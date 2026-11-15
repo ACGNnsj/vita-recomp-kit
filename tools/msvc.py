@@ -12,7 +12,9 @@ import sys
 def environment():
     """os.environ plus MSVC's variables, as a new dict."""
     env = dict(os.environ)
-    if env.get('VCToolsVersion'):
+    # Case-insensitive: some launchers upper-case the whole block (and VS 2026 no
+    # longer sets this at all, so projects preset it themselves)
+    if next((v for k, v in env.items() if k.lower() == 'vctoolsversion'), ''):
         return env
     if sys.platform != 'win32':
         return env
