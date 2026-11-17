@@ -4,6 +4,13 @@
 
 #include <cstdlib>
 
+#ifdef _WIN32
+#define ARMRECOMP_EXPORT __declspec(dllexport)
+#else
+// the module is built with hidden visibility: only the entry point is exported
+#define ARMRECOMP_EXPORT __attribute__((visibility("default")))
+#endif
+
 namespace armrecomp {
 
 extern const AotFunction g_functions[];
@@ -32,7 +39,7 @@ void unsupported(GuestContext *ctx, uint32_t pc) {
 
 } // namespace armrecomp
 
-extern "C" __declspec(dllexport) const armrecomp::AotModule *armrecomp_aot_init(const armrecomp::AotHost *host) {
+extern "C" ARMRECOMP_EXPORT const armrecomp::AotModule *armrecomp_aot_init(const armrecomp::AotHost *host) {
     using namespace armrecomp;
     if (!host || host->abi_version != AOT_ABI_VERSION || host->context_size != sizeof(GuestContext))
         return nullptr;

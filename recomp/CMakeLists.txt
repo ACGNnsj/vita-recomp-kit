@@ -4,6 +4,7 @@
 #   cmake -S <this repo>/recomp -B build/recomp -G Ninja -DCMAKE_BUILD_TYPE=Release
 #         -DGENERATED_DIR=<game>/generated -DVITA3K_SRC=<fork source> -DVITA3K_BUILD=<fork build>
 #   cmake --build build/recomp      # gen_<module>.lib and <RECOMP_DLL_PREFIX><module>.dll
+#                                   # (Linux: libgen_<module>.a and <RECOMP_DLL_PREFIX><module>.so)
 cmake_minimum_required(VERSION 3.20)
 project(armrecomp CXX)
 
@@ -43,6 +44,11 @@ foreach(module IN LISTS RECOMP_MODULES)
     if(MSVC)
         # huge functions: /bigobj; keep optimisation moderate (compile time and memory)
         target_compile_options(gen_${module} PRIVATE /bigobj /O1 /w)
+    else()
+        # the same moderate optimisation; the archive goes into a shared library
+        target_compile_options(gen_${module} PRIVATE -O1 -w)
+        set_target_properties(gen_${module} PROPERTIES POSITION_INDEPENDENT_CODE ON
+            CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
     endif()
     if(RECOMP_COUNT_INSNS)
         target_compile_definitions(gen_${module} PRIVATE RECOMP_COUNT_INSNS)
@@ -54,6 +60,14 @@ foreach(module IN LISTS RECOMP_MODULES)
     add_library(${RECOMP_DLL_PREFIX}${module} SHARED runtime/aot_dll.cpp)
     target_include_directories(${RECOMP_DLL_PREFIX}${module} PRIVATE runtime)
     target_link_libraries(${RECOMP_DLL_PREFIX}${module} PRIVATE gen_${module})
+    # ssd_aot_<module>.so, not libssd_aot_<module>.so, on Linux
+    set_target_properties(${RECOMP_DLL_PREFIX}${module} PROPERTIES PREFIX ""
+        CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+    if(NOT MSVC AND NOT APPLE)
+        # nothing from static archives is exported (a static libstdc++ would export all of
+        # itself): the module's only export is armrecomp_aot_init
+        target_link_options(${RECOMP_DLL_PREFIX}${module} PRIVATE "LINKER:--exclude-libs,ALL")
+    endif()
 endforeach()
 
 # --- per-instruction comparison tests against dynarmic ------------------------------------------
@@ -79,12 +93,14 @@ if(RECOMP_TESTS AND EXISTS "${test_dir}/tests.cpp")
         "${VITA3K_SRC}/external/dynarmic/externals/mcl/include"
         "${VITA3K_SRC}/external/fmt/include")
     set(dyn "${VITA3K_BUILD}/external/dynarmic")
+    set(pre "${CMAKE_STATIC_LIBRARY_PREFIX}")
+    set(suf "${CMAKE_STATIC_LIBRARY_SUFFIX}")
     target_link_libraries(recomp_tests PRIVATE
-        "${dyn}/src/dynarmic/${VITA3K_CONFIG}/dynarmic.lib"
-        "${dyn}/externals/mcl/src/${VITA3K_CONFIG}/mcl.lib"
-        "${dyn}/externals/zydis/${VITA3K_CONFIG}/Zydis.lib"
-        "${dyn}/externals/zydis/zycore/${VITA3K_CONFIG}/Zycore.lib"
-        "${VITA3K_BUILD}/external/fmt/${VITA3K_CONFIG}/fmt.lib")
+        "${dyn}/src/dynarmic/${VITA3K_CONFIG}/${pre}dynarmic${suf}"
+        "${dyn}/externals/mcl/src/${VITA3K_CONFIG}/${pre}mcl${suf}"
+        "${dyn}/externals/zydis/${VITA3K_CONFIG}/${pre}Zydis${suf}"
+        "${dyn}/externals/zydis/zycore/${VITA3K_CONFIG}/${pre}Zycore${suf}"
+        "${VITA3K_BUILD}/external/fmt/${VITA3K_CONFIG}/${pre}fmt${suf}")
     if(MSVC)
         target_compile_options(recomp_tests PRIVATE /bigobj /EHsc)
     endif()
