@@ -13,7 +13,7 @@ import tkinter as tk
 import webbrowser
 from tkinter import filedialog, messagebox, ttk
 
-from gameproject import EXE_SUFFIX, WINDOWS
+from gameproject import EXE_SUFFIX, MACOS, WINDOWS
 
 # a console of its own that no one sees, which every program the setup starts shares (Windows)
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -108,9 +108,9 @@ class Window:
         f.columnconfigure(0, weight=1)
         ttk.Label(f, text=game['name'], font=('Segoe UI', 14, 'bold')).grid(sticky='w')
         ttk.Label(f, wraplength=720, justify='left', text=(
-            f'This turns your own dump of the game ({" or ".join([game["title_id"]] + game.get("other_title_ids", []))}) into a playable PC port. It downloads '
+            f'This turns your own dump of the game ({" or ".join([game["title_id"]] + game.get("other_title_ids", []))}) into a playable port. It downloads '
             'the PS Vita firmware from Sony and a compiler, then translates the game\'s code and compiles it on '
-            'this PC, which takes a few minutes. Nothing of the game leaves your PC.')).grid(sticky='w', pady=(4, 10))
+            'this computer, which takes a few minutes. Nothing of the game leaves your computer.')).grid(sticky='w', pady=(4, 10))
 
         dump = ttk.LabelFrame(f, text='Your dump: a pkg (with its work.bin or .rif), a folder, a zip or a vpk',
                               padding=8)
@@ -141,10 +141,11 @@ class Window:
             link.grid(row=0, column=1, padx=4)
             link.bind('<Button-1>', lambda e: webbrowser.open(licence_url))
         shortcut = ('Put a shortcut to the game on the desktop' if WINDOWS else
+                    'Put the game in Applications too (Launchpad and Spotlight list it)' if MACOS else
                     'Add the game to the applications menu and the desktop (Steam\'s "Add a Non-Steam Game" '
                     'lists it)')
         ttk.Checkbutton(f, variable=self.shortcut, text=shortcut).grid(sticky='w', pady=(4, 0))
-        if not WINDOWS:
+        if not WINDOWS and not MACOS:
             ttk.Checkbutton(f, variable=self.steam, text='Add the game to Steam (a non-Steam game: on a Steam Deck '
                             'it then starts from Game Mode; Steam must be running)').grid(sticky='w')
 
@@ -212,19 +213,19 @@ class Window:
             return
         args = [a for p in parts for a in p.args()]
         # Windows: python.exe beside the pythonw.exe that runs the window, for a console the setup's
-        # programs share; Linux: the same interpreter
+        # programs share; Linux and macOS: the same interpreter
         python = os.path.join(os.path.dirname(sys.executable), 'python.exe') if WINDOWS else sys.executable
         cmd = [python, '-I', '-u', self.setup_py, *args, '--out', out, *self.extra_args]
         if WINDOWS:
             cmd.append('--accept-microsoft-license')
         if self.shortcut.get():
             cmd.append('--shortcut')
-        if not WINDOWS and self.steam.get():
+        if not WINDOWS and not MACOS and self.steam.get():
             cmd.append('--steam')
         self.install['state'] = 'disabled'
         self.bar['value'] = 0
         self.stage.set(STAGES[0][1])
-        # Windows: a hidden console; Linux: a process group of its own, so Close can stop all of it
+        # Windows: a hidden console; Linux and macOS: a process group of its own, so Close can stop all of it
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                      encoding='utf-8', errors='replace',
                                      creationflags=NO_WINDOW, start_new_session=not WINDOWS)
@@ -257,8 +258,9 @@ class Window:
         self.install['state'] = 'normal'
         if code == 0:
             self.bar['value'] = self.bar['maximum']
+            where = 'its app there' if MACOS else 'the desktop shortcut' if WINDOWS else 'the applications menu'
             self.stage.set(f'Done. The game is in {self.out.get().strip()}: play it from there, with Play, '
-                           'or from the desktop shortcut. Don\'t start the exe inside the setup\'s own folder.')
+                           f'or from {where}. Don\'t start the game inside the setup\'s own folder.')
             self.play['state'] = 'normal'
             self.open['state'] = 'normal'
         else:
@@ -271,6 +273,8 @@ class Window:
     def open_folder(self):
         if WINDOWS:
             os.startfile(self.out.get().strip())
+        elif MACOS:
+            subprocess.Popen(['open', self.out.get().strip()])
         else:
             subprocess.Popen(['xdg-open', self.out.get().strip()])
 

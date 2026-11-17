@@ -1,0 +1,30 @@
+{
+ "schema": "vita-recomp-kit.setup.v1",
+ "platform": "macos",
+ "python": "3.12.16",
+ "python_build_standalone": "20261026",
+ "wheels": {
+  "capstone": "5.0.7",
+  "PyYAML": "6.0.3"
+ },
+ "files": [
+  {
+   "kind": "python",
+   "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-aarch64-apple-darwin-install_only.tar.gz",
+   "sha256": "fbf4afef53c2a6b72bb741bc06d5671a9dfaf87bd84e5aa73ac9b3d0d589f14e",
+   "size": 25172086
+  },
+  {
+   "kind": "wheel",
+   "url": "https://files.pythonhosted.org/packages/b2/91/98fdb020106469d2354920ffb989507f8c494d847eb9135202a0b20afe8d/capstone-5.0.7-py3-none-macosx_10_9_universal2.whl",
+   "sha256": "388af4ddb9224d3b4f9269673ee575b3f94f77774d48b3f1a283ad13c29a106a",
+   "size": 2192836
+  },
+  {
+   "kind": "wheel",
+   "url": "https://files.pythonhosted.org/packages/89/a0/6cf41a19a1f2f3feab0e9c0b74134aa2ce6849093d5517a0c550fe37a648/pyyaml-6.0.3-cp312-cp312-macosx_11_0_arm64.whl",
+   "sha256": "fc09d0aa354569bc501d4e787133afc08552722d3ab34836a80547331bb5d4a0",
+   "size": 173973
+  }
+ ]
+}

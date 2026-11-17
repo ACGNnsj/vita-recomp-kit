@@ -1,5 +1,5 @@
 """Build a game project's recompiled modules (generated/<module>/, from recomp/recompile.py) into
-<prefix><module>.dll.
+<prefix><module>.dll (with zig's toolchain on Linux and macOS: .so, .dylib).
 
 usage:
   python -I build-recomp.py [--project DIR] [--modules eboot libc ...] [--jobs N] [--toolchain DIR]
@@ -64,7 +64,8 @@ def main():
         toolchain.build_modules(gen, modules, build, a.toolchain, a.jobs, ('RECOMP_BISECT',) if a.bisect else ())
     else:
         build = build_with_cmake(root, gen, modules, a.jobs, a.bisect)
-    dlls = sorted(glob.glob(os.path.join(build, '*.dll')))
+    dlls = sorted(f for f in glob.glob(os.path.join(build, toolchain.DLL_PREFIX + '*'))
+                  if f.endswith(('.dll', '.so', '.dylib')))
     print(f'built in {(time.time() - start) / 60:.1f} min: ' + ', '.join(os.path.basename(d) for d in dlls))
 
 

@@ -2,7 +2,8 @@
 
 game.json:
   {
-    "id": "shinobido2",                       front end: <id>.exe (Linux: <id>.x86_64), <id>.ini, <id>/
+    "id": "shinobido2",                       front end: <id>.exe (Linux: <id>.x86_64, macOS: <id>.arm64),
+                                              <id>.ini, <id>/
     "name": "Shinobido 2: Revenge of Zen",
     "title_id": "PCSE00015",
     "other_title_ids": ["PCSB00123"],         the same game in other regions (optional): the
@@ -16,6 +17,7 @@ game.json:
     "dist_readme_linux": "docs/dist-readme-linux.txt",   the same on Linux (default: dist_readme)
     "dist_files": {"run-player2.bat": "..."}  more files written into the packaged folder (Windows)
     "dist_files_linux": {"run-player2.sh": "..."}   the same on Linux (written executable)
+    "dist_readme_macos", "dist_files_macos"   the same on macOS (default: none of the Linux files)
   }
 """
 import json
@@ -24,8 +26,10 @@ import struct
 import sys
 
 WINDOWS = sys.platform == 'win32'
-EXE_SUFFIX = '.exe' if WINDOWS else '.x86_64'  # the fork's add_game names it <id>.x86_64 on Linux
-MODULE_SUFFIX = '.dll' if WINDOWS else '.so'   # ssd_aot_<module>.dll / .so
+MACOS = sys.platform == 'darwin'  # Apple Silicon only (arm64)
+# the fork's add_game names it <id>.x86_64 on Linux, <id>.arm64 on macOS
+EXE_SUFFIX = '.exe' if WINDOWS else '.arm64' if MACOS else '.x86_64'
+MODULE_SUFFIX = '.dll' if WINDOWS else '.dylib' if MACOS else '.so'  # ssd_aot_<module>.dll / .dylib / .so
 
 
 def ico_to_png(ico, png):
@@ -62,8 +66,12 @@ class Project:
         self.modules = g.get('modules', {})
         self.load_bases = g.get('load_bases', {})
         self.dump_seconds = g.get('dump_seconds', 45)
-        self.dist_readme = g.get('dist_readme') if WINDOWS else g.get('dist_readme_linux', g.get('dist_readme'))
-        self.dist_files = g.get('dist_files', {}) if WINDOWS else g.get('dist_files_linux', {})
+        if WINDOWS:
+            self.dist_readme, self.dist_files = g.get('dist_readme'), g.get('dist_files', {})
+        elif MACOS:
+            self.dist_readme, self.dist_files = g.get('dist_readme_macos', g.get('dist_readme')), g.get('dist_files_macos', {})
+        else:
+            self.dist_readme, self.dist_files = g.get('dist_readme_linux', g.get('dist_readme')), g.get('dist_files_linux', {})
         self.exe_name = self.id + EXE_SUFFIX
 
     def installed_title(self, fs):

@@ -1,0 +1,14 @@
+{
+ "schema": "vita-recomp-kit.toolchain.v1",
+ "zig": "0.17.1",
+ "download_bytes": 54001240,
+ "payloads": [
+  {
+   "kind": "zig",
+   "file": "zig-aarch64-macos-0.17.1.tar.xz",
+   "url": "https://ziglang.org/download/0.17.1/zig-aarch64-macos-0.17.1.tar.xz",
+   "sha256": "75f1bc7a1e9852f17ec9a0c1895f767c4ec56d46bc8a834920eece1d0359dd8d",
+   "size": 54001240
+  }
+ ]
+}

@@ -15,13 +15,16 @@ usage:
 sdk/{Include,Lib}/<version>/ and redist/ (the VC++ runtime DLLs a game's folder carries, as Microsoft
 allows for an application's own folder). build-recomp.py --toolchain <dir> builds the recompiled modules with it.
 
-Linux (toolchain-linux.json): the toolchain is zig alone, a self-contained clang with libc++ and
-glibc's link stubs, under MIT and LLVM's Apache licence (nothing to accept). fetch unpacks it into
-<dir>/zig/, and the modules come out as ssd_aot_<module>.so; zig keeps what it builds on first use
-(libc++) in <dir>/cache/.
-  python -I toolchain.py fetch toolchain-linux.json <dir>
+Linux (toolchain-linux.json) and macOS (toolchain-macos.json, Apple Silicon): the toolchain is zig
+alone, a self-contained clang with libc++ and the system's link stubs (glibc's; macOS's libSystem),
+under MIT and LLVM's Apache licence (nothing to accept, no Xcode or Command Line Tools). fetch unpacks
+it into <dir>/zig/, and the modules come out as ssd_aot_<module>.so (.dylib on macOS, ad-hoc signed by
+zig's linker, as Apple Silicon requires); zig keeps what it builds on first use (libc++) in <dir>/cache/.
+  python -I toolchain.py fetch toolchain-linux.json|toolchain-macos.json <dir>
 """
 import concurrent.futures, glob, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile, urllib.request, zipfile
+
+MACOS = sys.platform == 'darwin'
 
 CHANNEL = 'https://aka.ms/vs/17/release/channel'
 MICROSOFT_LICENSE = 'https://go.microsoft.com/fwlink/?LinkId=2179911'  # Visual Studio Build Tools
@@ -48,12 +51,16 @@ SYSTEM_LIBS = ['kernel32.lib', 'user32.lib', 'gdi32.lib', 'winspool.lib', 'shell
                'oleaut32.lib', 'uuid.lib', 'comdlg32.lib', 'advapi32.lib']
 # Linux: zig's clang, which brings libc++ and the glibc stubs to link against (no sysroot). The target
 # glibc is the oldest the front end needs too; the baseline CPU keeps clang to what the Windows build
-# and GCC assume (no FMA contraction, no AVX)
-ZIG_TARGET = ['-target', 'x86_64-linux-gnu.2.30', '-mcpu=baseline']
+# and GCC assume (no FMA contraction, no AVX). macOS: the fork's deployment target (CMakeLists.txt,
+# CMAKE_OSX_DEPLOYMENT_TARGET) and the first Apple Silicon CPU
+ZIG_TARGET = (['-target', 'aarch64-macos.13.3', '-mcpu=apple_m1'] if MACOS else
+              ['-target', 'x86_64-linux-gnu.2.30', '-mcpu=baseline'])
 ZIG_CXXFLAGS = ['-std=c++20', '-O2', '-fPIC', '-fvisibility=hidden', '-fvisibility-inlines-hidden', '-DNDEBUG']
 # no contraction, as in recomp/CMakeLists.txt: ARMv7's vmla/vmls round twice (it matters on arm64 hosts)
 ZIG_GEN_FLAGS = ['-O1', '-w', '-ffp-contract=off', '-DRECOMP_COUNT_INSNS']
-# a module exports its entry point and nothing else (libc++'s operator new/delete stay inside)
+# a module exports its entry point and nothing else (libc++'s operator new/delete stay inside). zig's
+# Mach-O linker takes no export list: there, hidden visibility leaves the entry point and libc++'s
+# operator new/delete, which two-level namespaces keep from binding anything outside the module
 ZIG_EXPORTS = '{\n  global: armrecomp_aot_init;\n  local: *;\n};\n'
 # what a build needs from llvm-mingw: the real compiler (bin/clang.exe there is a wrapper that reads a
 # MinGW target from its name), the linker, the librarian, the DLLs they load and clang's headers
@@ -147,7 +154,8 @@ def download(lock, cache):
 
 
 def fetch_zig(lock, dest):
-    """Linux: zig (MIT; LLVM's clang and libc++ inside, under their Apache licence) into dest/zig."""
+    """Linux and macOS: zig (MIT; LLVM's clang and libc++ inside, under their Apache licence) into
+    dest/zig."""
     download(lock, os.path.join(dest, 'downloads'))
     payload = next(p for p in lock['payloads'] if p['kind'] == 'zig')
     zig_dir = os.path.join(dest, 'zig')
@@ -158,7 +166,7 @@ def fetch_zig(lock, dest):
         for m in t.getmembers():
             parts = m.name.split('/', 1)
             if len(parts) == 2 and parts[1]:
-                m.name = parts[1]  # without the top folder (zig-x86_64-linux-<version>/)
+                m.name = parts[1]  # without the top folder (zig-<arch>-<os>-<version>/)
                 members.append(m)
         t.extractall(zig_dir, members, filter='tar')
     with open(os.path.join(dest, 'toolchain.json'), 'w', encoding='utf-8', newline='\n') as f:
@@ -285,7 +293,7 @@ def compile_all(work, env, jobs):
 
 
 def build_modules_zig(gen, modules, build, toolchain_dir, jobs=4, defines=()):
-    """Linux: generated/<module>/ into <build>/ssd_aot_<module>.so with zig's clang."""
+    """Linux and macOS: generated/<module>/ into <build>/ssd_aot_<module>.so (.dylib) with zig's clang."""
     zig = os.path.join(os.path.abspath(toolchain_dir), 'zig', 'zig')
     # zig keeps the libc++ it builds on first use in its cache: the toolchain's own folder
     cache = os.path.join(os.path.abspath(toolchain_dir), 'cache')
@@ -314,15 +322,15 @@ def build_modules_zig(gen, modules, build, toolchain_dir, jobs=4, defines=()):
     for m in modules:
         objs = sorted(glob.glob(os.path.join(build, 'obj', m, '*.o')))
         lib = os.path.join(build, f'libgen_{m}.a')
-        so = os.path.join(build, f'{DLL_PREFIX}{m}.so')
+        so = os.path.join(build, f'{DLL_PREFIX}{m}' + ('.dylib' if MACOS else '.so'))
         if os.path.exists(so) and os.path.getmtime(so) >= max(os.path.getmtime(o) for o in objs + [entry]):
             continue
         if os.path.exists(lib):
             os.remove(lib)  # ar adds to an existing archive
         err = run([zig, 'ar', 'rcs', lib, *objs], env)
         if err is None:
-            err = run([zig, 'c++', *ZIG_TARGET, '-shared', f'-Wl,--version-script,{exports}', '-Wl,--gc-sections',
-                       '-s', '-o', so, entry, lib], env)
+            unused = ['-Wl,-dead_strip'] if MACOS else [f'-Wl,--version-script,{exports}', '-Wl,--gc-sections']
+            err = run([zig, 'c++', *ZIG_TARGET, '-shared', *unused, '-s', '-o', so, entry, lib], env)
         if err is not None:
             sys.exit(f'{m}: linking failed\n{err}')
     # zig's cache holds a copy of every object (1.5 GB for Soul Sacrifice Delta) besides libc++:
@@ -331,7 +339,8 @@ def build_modules_zig(gen, modules, build, toolchain_dir, jobs=4, defines=()):
 
 
 def build_modules(gen, modules, build, toolchain_dir, jobs=4, defines=()):
-    """Compile generated/<module>/ into <build>/ssd_aot_<module>.dll (Windows; .so with zig on Linux)
+    """Compile generated/<module>/ into <build>/ssd_aot_<module>.dll (Windows; .so or .dylib with zig on
+    Linux and macOS)
     with the toolchain in toolchain_dir. defines: extra preprocessor definitions for the generated
     code (RECOMP_BISECT)."""
     if os.path.exists(os.path.join(toolchain_dir, 'zig', 'zig')):

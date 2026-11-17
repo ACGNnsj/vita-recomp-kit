@@ -16,9 +16,16 @@ Nothing derived from a game or the firmware goes in: release checks refuse such 
 Linux (a setup-linux.json lock, run on Linux): setup.sh, python/ from python-build-standalone (Tk
 included) with the manylinux wheels, kit/ as above with <id>.x86_64; --zip makes a .tar.gz.
 
+macOS (a setup-macos.json lock, run on an Apple Silicon Mac): setup.command, python/ from
+python-build-standalone (Tk included) with the macOS arm64 wheels, kit/ as above with <id>.arm64 and
+libMoltenVK.dylib; --zip makes a .tar.gz. Nothing is signed with a developer ID: setup.command, the
+one file the player opens through Gatekeeper ("Open Anyway"), clears the download's quarantine from
+the rest of its folder.
+
 usage:
   python -I make-setup.py resolve <lock.json>           pin the embeddable Python and the wheels
   python -I make-setup.py resolve-linux <lock.json> <tag>   pin python-build-standalone release <tag>
+  python -I make-setup.py resolve-macos <lock.json> <tag>   the same for Apple Silicon macOS
   python -I make-setup.py build <lock.json> --project DIR --bin DIR --out DIR [--zip]
 """
 import argparse
@@ -55,6 +62,7 @@ VC_RUNTIME = re.compile(r'(?i)^(msvcp140.*|vcruntime140.*|concrt140)\.dll$')
 # Linux: Python from python-build-standalone (with Tk), the same wheels as manylinux builds
 PBS_REPO = 'astral-sh/python-build-standalone'
 LINUX_BIN_FILES = re.compile(r'^(\w[\w-]*\.x86_64|\w[\w-]*\.ico|COPYING\.txt)$')
+MACOS_BIN_FILES = re.compile(r'^(\w[\w-]*\.arm64|\w[\w-]*\.ico|libMoltenVK\.dylib|COPYING\.txt)$')
 LINUX_SYSTEM_LIBS = {'libc.so.6', 'libm.so.6', 'libdl.so.2', 'libpthread.so.0', 'librt.so.1',
                      'ld-linux-x86-64.so.2', 'libz.so.1'}
 
@@ -179,28 +187,35 @@ def resolve(lock_path, cache):
     print(f'{lock_path}: Python {PYTHON}, ' + ', '.join(f'{k} {v}' for k, v in WHEELS.items()))
 
 
-def resolve_linux(lock_path, cache, tag):
-    """Pin python-build-standalone's CPython 3.12 of release <tag> (Tk included) and the wheels."""
+def resolve_linux(lock_path, cache, tag, platform='linux'):
+    """Pin python-build-standalone's CPython 3.12 of release <tag> (Tk included) and the wheels, for
+    x86-64 Linux or (platform 'macos') Apple Silicon macOS."""
     os.makedirs(cache, exist_ok=True)
     release = json.loads(get(f'https://api.github.com/repos/{PBS_REPO}/releases/tags/{tag}'))
-    pattern = re.compile(r'^cpython-(3\.12\.\d+)\+' + re.escape(tag) + r'-x86_64-unknown-linux-gnu-install_only\.tar\.gz$')
+    triple = 'aarch64-apple-darwin' if platform == 'macos' else 'x86_64-unknown-linux-gnu'
+    pattern = re.compile(r'^cpython-(3\.12\.\d+)\+' + re.escape(tag) + '-' + triple + r'-install_only\.tar\.gz$')
     asset = next((x for x in release['assets'] if pattern.match(x['name'])), None)
     if not asset:
-        sys.exit(f'{PBS_REPO} {tag}: no CPython 3.12 install_only build for x86_64 Linux')
+        sys.exit(f'{PBS_REPO} {tag}: no CPython 3.12 install_only build for {triple}')
     version = pattern.match(asset['name']).group(1)
     sums = get(f'https://github.com/{PBS_REPO}/releases/download/{tag}/SHA256SUMS').decode()
     digest = next(line.split()[0] for line in sums.splitlines() if line.endswith(' ' + asset['name']))
     files = [{'kind': 'python', 'url': asset['browser_download_url'], 'sha256': digest, 'size': asset['size']}]
     tag_py = 'cp' + ''.join(version.split('.')[:2])
+
+    def fits(fn):
+        if platform == 'macos':  # arm64 or universal2 (both architectures) macOS wheels
+            return 'macosx' in fn and ('arm64' in fn or 'universal2' in fn)
+        return 'manylinux' in fn and 'x86_64' in fn
     for name, wversion in WHEELS.items():
         info = json.loads(get(f'https://pypi.org/pypi/{name}/{wversion}/json'))
-        wheels = [u for u in info['urls'] if u['filename'].endswith('.whl') and 'manylinux' in u['filename']
-                  and 'x86_64' in u['filename'] and (f'-{tag_py}-' in u['filename'] or '-py3-none-' in u['filename'])]
+        wheels = [u for u in info['urls'] if u['filename'].endswith('.whl') and fits(u['filename'])
+                  and (f'-{tag_py}-' in u['filename'] or '-py3-none-' in u['filename'])]
         if not wheels:
-            sys.exit(f'{name} {wversion}: no manylinux x86_64 wheel for {tag_py}')
+            sys.exit(f'{name} {wversion}: no {triple} wheel for {tag_py}')
         w = wheels[0]
         files.append({'kind': 'wheel', 'url': w['url'], 'sha256': w['digests']['sha256'], 'size': w['size']})
-    lock = {'schema': 'vita-recomp-kit.setup.v1', 'platform': 'linux', 'python': version,
+    lock = {'schema': 'vita-recomp-kit.setup.v1', 'platform': platform, 'python': version,
             'python_build_standalone': tag, 'wheels': WHEELS, 'files': files}
     with open(lock_path, 'w', encoding='utf-8', newline='\n') as f:
         json.dump(lock, f, indent=1)
@@ -249,9 +264,8 @@ def copy_kit(out):
     shutil.copy2(os.path.join(KIT, 'LICENSE'), os.path.join(out, 'kit', 'LICENSE'))
 
 
-def build_linux(a, lock, p, out):
-    """The Linux setup: python/ (python-build-standalone, Tk included), kit/, setup.sh; a .tar.gz,
-    which keeps the executables' modes."""
+def python_standalone(lock, out):
+    """python/ from python-build-standalone (Linux, macOS), with the wheels in its site-packages."""
     paths = fetch(lock, os.path.join(os.path.dirname(out), 'setup-downloads'))
     py = os.path.join(out, 'python')
     with tarfile.open(paths['python'][0]) as t:
@@ -267,26 +281,53 @@ def build_linux(a, lock, p, out):
         with zipfile.ZipFile(w) as z:
             z.extractall(site)
             for info in z.infolist():  # zip keeps no modes: capstone's library must stay loadable
-                if info.filename.endswith('.so') or '.so.' in info.filename:
+                if info.filename.endswith(('.so', '.dylib')) or '.so.' in info.filename:
                     os.chmod(os.path.join(site, info.filename), 0o755)
-    copy_kit(out)
 
-    game = os.path.join(out, 'kit', 'game')
+
+def macho_dylibs(path):
+    """The libraries an arm64 Mach-O file loads (normal, weak, re-exported and upward), from its load
+    commands; a universal file's arm64 slice."""
+    with open(path, 'rb') as f:
+        d = f.read()
+    base = 0
+    if struct.unpack_from('>I', d, 0)[0] == 0xcafebabe:  # universal: find the arm64 slice
+        for i in range(struct.unpack_from('>I', d, 4)[0]):
+            cputype, _, offset, _, _ = struct.unpack_from('>iiIII', d, 8 + 20 * i)
+            if cputype == 0x0100000c:
+                base = offset
+    if struct.unpack_from('<I', d, base)[0] != 0xfeedfacf:
+        raise ValueError(f'{path}: not a 64-bit Mach-O file')
+    ncmds = struct.unpack_from('<I', d, base + 16)[0]
+    names, o = [], base + 32
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from('<II', d, o)
+        if cmd in (0xc, 0x80000018, 0x8000001f, 0x80000023):  # LC_LOAD_(WEAK_,UPWARD_)DYLIB, LC_REEXPORT_DYLIB
+            n = o + struct.unpack_from('<I', d, o + 8)[0]
+            names.append(d[n:d.index(b'\0', n)].decode())
+        o += size
+    return names
+
+
+def missing_macos_libs(path):
+    """macOS: libraries a Mach-O file loads that are neither part of macOS nor beside it."""
+    here = os.path.dirname(path)
+    return sorted(n for n in macho_dylibs(path)
+                  if not n.startswith(('/usr/lib/', '/System/Library/'))
+                  and not (n.startswith(('@rpath/', '@executable_path/', '@loader_path/'))
+                           and os.path.exists(os.path.join(here, n.split('/', 1)[1]))))
+
+
+def copy_game(p, bin_dir, game, files, exe):
+    """kit/game: the front end's files from bin_dir (those files matches, only this game's executable),
+    Vita3K's data, game.json and the playable folder's README."""
     os.makedirs(game)
-    bin_dir = os.path.abspath(a.bin)
-    exe = p.id + '.x86_64'
     if not os.path.exists(os.path.join(bin_dir, exe)):
         sys.exit(f'no {exe} in {bin_dir}')
+    suffix = os.path.splitext(exe)[1]
     for f in os.listdir(bin_dir):
-        if os.path.isfile(os.path.join(bin_dir, f)) and LINUX_BIN_FILES.match(f) \
-                and (not f.endswith('.x86_64') or f == exe):
+        if os.path.isfile(os.path.join(bin_dir, f)) and files.match(f) and (not f.endswith(suffix) or f == exe):
             shutil.copy2(os.path.join(bin_dir, f), game)
-    # without its debug information (most of a RelWithDebInfo build's size)
-    objcopy = shutil.which('objcopy')
-    if objcopy:
-        subprocess.run([objcopy, '--strip-debug', os.path.join(game, exe)], check=True)
-    else:
-        print(f'warning: no objcopy: {exe} keeps its debug information')
     for d in BIN_DIRS:
         if os.path.isdir(os.path.join(bin_dir, d)):
             shutil.copytree(os.path.join(bin_dir, d), os.path.join(game, d))
@@ -294,6 +335,74 @@ def build_linux(a, lock, p, out):
     if p.dist_readme:
         os.makedirs(os.path.dirname(os.path.join(game, p.dist_readme)), exist_ok=True)
         shutil.copy2(os.path.join(p.root, p.dist_readme), os.path.join(game, p.dist_readme))
+
+
+def build_macos(a, lock, p, out):
+    """The macOS setup (Apple Silicon): python/ (python-build-standalone, Tk included), kit/,
+    setup.command; a .tar.gz, which keeps the executables' modes and Python's symbolic links."""
+    python_standalone(lock, out)
+    copy_kit(out)
+    game = os.path.join(out, 'kit', 'game')
+    exe = p.id + '.arm64'
+    copy_game(p, os.path.abspath(a.bin), game, MACOS_BIN_FILES, exe)
+    if not os.path.exists(os.path.join(game, 'libMoltenVK.dylib')):
+        shutil.rmtree(out)
+        sys.exit(f'refused, no libMoltenVK.dylib beside {exe} in {a.bin}')
+    # without the debug map (stripping drops the linker's ad-hoc signature, which Apple Silicon
+    # needs to run anything: sign it again, ad hoc)
+    subprocess.run(['strip', '-S', os.path.join(game, exe)], check=True)
+    subprocess.run(['codesign', '--force', '--sign', '-', os.path.join(game, exe)], check=True)
+
+    with open(os.path.join(out, 'README.txt'), 'w', encoding='utf-8', newline='\n') as f:
+        f.write(f'{p.name}: setup (macOS 13.3 or newer, Apple Silicon)\n\n'
+                'Double-click setup.command. macOS first refuses it, as it does anything downloaded that\n'
+                'isn\'t signed by a registered Apple developer: click Done, open System Settings > Privacy &\n'
+                'Security, scroll down to "setup.command was blocked" and click Open Anyway (once). Or, in\n'
+                'Terminal, run: sh <this folder>/setup.command\n\n'
+                'The setup asks for your own dump of the game, downloads the PS Vita firmware from Sony and a\n'
+                'compiler (zig, from ziglang.org), and builds the game into the folder you choose (by default\n'
+                f'"{p.id}" next to this setup\'s folder). Play from the app in that folder, or from\n'
+                'Applications if you let the setup put it there. Nothing in this folder is the game itself:\n'
+                'once the setup has finished, this folder can be deleted.\n')
+    launcher = os.path.join(out, 'setup.command')
+    with open(launcher, 'w', encoding='ascii', newline='\n') as f:
+        # A browser marks a download as quarantined, and unpacking passes the mark to every file:
+        # Gatekeeper would then stop Python and each library it loads. The player let this script
+        # through: it clears the mark from the rest of its folder. No arguments: the window; with
+        # arguments, the console setup
+        f.write('#!/bin/sh\nhere=$(cd "$(dirname "$0")" && pwd -P)\n'
+                'xattr -dr com.apple.quarantine "$here" 2>/dev/null\n'
+                'exec "$here/python/bin/python3" -I -u "$here/kit/tools/setup.py" "$@"\n')
+    os.chmod(launcher, 0o755)
+
+    missing = missing_macos_libs(os.path.join(game, exe))
+    if missing:
+        shutil.rmtree(out)
+        sys.exit(f'refused, {exe} needs libraries a player\'s Mac may lack: ' + ', '.join(missing))
+    release_check(out)
+
+    size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(out) for f in fs)
+    print(f'{out}: {size / 2**20:,.0f} MB')
+    if a.zip:
+        archive = shutil.make_archive(out, 'gztar', os.path.dirname(out), os.path.basename(out))
+        print(f'{archive}: {os.path.getsize(archive) / 2**20:,.0f} MB, SHA-256 {sha256(archive)}')
+
+
+def build_linux(a, lock, p, out):
+    """The Linux setup: python/ (python-build-standalone, Tk included), kit/, setup.sh; a .tar.gz,
+    which keeps the executables' modes."""
+    python_standalone(lock, out)
+    copy_kit(out)
+
+    game = os.path.join(out, 'kit', 'game')
+    exe = p.id + '.x86_64'
+    copy_game(p, os.path.abspath(a.bin), game, LINUX_BIN_FILES, exe)
+    # without its debug information (most of a RelWithDebInfo build's size)
+    objcopy = shutil.which('objcopy')
+    if objcopy:
+        subprocess.run([objcopy, '--strip-debug', os.path.join(game, exe)], check=True)
+    else:
+        print(f'warning: no objcopy: {exe} keeps its debug information')
 
     with open(os.path.join(out, 'README.txt'), 'w', encoding='utf-8', newline='\n') as f:
         f.write(f'{p.name}: setup (Linux, x86-64; Steam Deck in desktop mode)\n\n'
@@ -327,12 +436,12 @@ def build_linux(a, lock, p, out):
 def build(a):
     lock = json.load(open(a.lock, encoding='utf-8'))
     p = Project(a.project)
-    if lock.get('platform') == 'linux':
+    if lock.get('platform') in ('linux', 'macos'):
         out = os.path.abspath(a.out)
         if os.path.exists(out):
             shutil.rmtree(out)
         os.makedirs(out)
-        return build_linux(a, lock, p, out)
+        return (build_macos if lock['platform'] == 'macos' else build_linux)(a, lock, p, out)
     out = os.path.abspath(a.out)
     if os.path.exists(out):
         shutil.rmtree(out)
@@ -420,8 +529,9 @@ def main():
     if len(sys.argv) >= 3 and sys.argv[1] == 'resolve':
         resolve(sys.argv[2], os.path.join(os.getcwd(), 'build', 'setup-downloads'))
         return
-    if len(sys.argv) >= 4 and sys.argv[1] == 'resolve-linux':
-        resolve_linux(sys.argv[2], os.path.join(os.getcwd(), 'build', 'setup-downloads'), sys.argv[3])
+    if len(sys.argv) >= 4 and sys.argv[1] in ('resolve-linux', 'resolve-macos'):
+        resolve_linux(sys.argv[2], os.path.join(os.getcwd(), 'build', 'setup-downloads'), sys.argv[3],
+                      sys.argv[1].split('-')[1])
         return
     ap = argparse.ArgumentParser(usage=__doc__)
     ap.add_argument('command', choices=['build'])

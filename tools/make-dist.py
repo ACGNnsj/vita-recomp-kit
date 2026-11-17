@@ -1,5 +1,5 @@
-"""Lay out a self-contained folder of a game's port: dist/<name>/ with its front end (<id>.exe), the
-DLLs it needs, Vita3K's data, the recompiled modules (built locally from the player's own dump,
+"""Lay out a self-contained folder of a game's port: dist/<name>/ with its front end (<id>.exe; Linux
+<id>.x86_64, macOS <id>.arm64 and libMoltenVK.dylib), the DLLs it needs, Vita3K's data, the recompiled modules (built locally from the player's own dump,
 never shared), a commented <id>.ini and a README. Nothing here is committed (dist/ is ignored).
 
 usage:
@@ -57,6 +57,8 @@ def main():
     dlls = ['discord_game_sdk.dll', 'libssl-4-x64.dll', 'libcrypto-4-x64.dll']
     dlls += [os.path.basename(f) for f in glob.glob(os.path.join(bin_dir, 'av*.dll'))]
     dlls += [os.path.basename(f) for f in glob.glob(os.path.join(bin_dir, 'sw*.dll'))]
+    # macOS: MoltenVK, Vulkan over Metal (the executable's rpath is its own folder)
+    dlls += ['libMoltenVK.dylib']
     for d in dlls:
         if os.path.exists(os.path.join(bin_dir, d)):
             shutil.copy2(os.path.join(bin_dir, d), out)
@@ -64,7 +66,8 @@ def main():
     if a.redist:
         for f in glob.glob(os.path.join(a.redist, 'msvcp140*.dll')) + glob.glob(os.path.join(a.redist, 'vcruntime140*.dll')):
             shutil.copy2(f, out)
-    # Linux: the icon a desktop entry shows, from the .ico the build puts beside the executable
+    # Linux: the icon a desktop entry shows, from the .ico the build puts beside the executable (macOS:
+    # the setup's app bundle makes its icon from it)
     if not WINDOWS and os.path.exists(os.path.join(bin_dir, p.id + '.ico')):
         ico_to_png(os.path.join(bin_dir, p.id + '.ico'), os.path.join(out, p.id + '.png'))
     # static assets Vita3K reads next to the executable

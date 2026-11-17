@@ -15,7 +15,9 @@ usage:
   --qt        Qt 6 (MSVC x64) for Vita3K's interface; default Qt6_ROOT, or the newest C:/Qt/<v>/msvc*_64
 
 On Linux it builds the games only (as --games-only) with GCC, g++-14 when there is one (the Steam
-Runtime sniper SDK's), and libstdc++ linked in; the executables are <id>.x86_64. Run it with Python
+Runtime sniper SDK's), and libstdc++ linked in; the executables are <id>.x86_64. On macOS (Apple
+Silicon) the games only too, with Apple's clang (Xcode or the Command Line Tools), OpenSSL and Boost
+built from source; the executables are <id>.arm64, next to libMoltenVK.dylib. Run it with Python
 3.12 or newer (Vita3K's language catalog generator needs it).
 """
 import argparse
@@ -38,23 +40,31 @@ def find_qt():
 
 def build_linux(a, src):
     """Linux: the games only (no Qt), with GCC (g++-14 when there is one: the Steam Runtime sniper
-    SDK's), libstdc++ and libgcc linked in, into build/vita3k-games[-nojit]."""
+    SDK's), libstdc++ and libgcc linked in, into build/vita3k-games[-nojit]. macOS: the games only,
+    with Apple's clang, into the same folder."""
     if sys.version_info < (3, 12):
         sys.exit('Vita3K\'s language catalog generator needs Python 3.12 or newer: run this with one')
     root = os.path.abspath(a.project)
     build = os.path.join(root, 'build', 'vita3k-games' + ('-nojit' if a.no_jit else ''))
     env = dict(os.environ, CMAKE_POLICY_VERSION_MINIMUM='3.5')
-    cc, cxx = ('gcc-14', 'g++-14') if shutil.which('g++-14') else ('gcc', 'g++')
-    cc, cxx = env.get('CC', cc), env.get('CXX', cxx)
-    static = '-static-libstdc++ -static-libgcc'
+    if sys.platform == 'darwin':
+        # Apple's clang and libc++. OpenSSL and Boost from source: a player's Mac has neither
+        # Homebrew's nor MacPorts' libraries, and the executable must not load them
+        compilers = ['-DCMAKE_C_COMPILER=' + env.get('CC', 'cc'), '-DCMAKE_CXX_COMPILER=' + env.get('CXX', 'c++')]
+        platform = ['-DFORCE_BUILD_OPENSSL_MAC=ON', '-DVITA3K_FORCE_CUSTOM_BOOST=ON']
+    else:
+        cc, cxx = ('gcc-14', 'g++-14') if shutil.which('g++-14') else ('gcc', 'g++')
+        compilers = ['-DCMAKE_C_COMPILER=' + env.get('CC', cc), '-DCMAKE_CXX_COMPILER=' + env.get('CXX', cxx)]
+        static = '-static-libstdc++ -static-libgcc'
+        platform = [f'-DCMAKE_EXE_LINKER_FLAGS={static}', f'-DCMAKE_SHARED_LINKER_FLAGS={static}']
     if a.reconfigure or not os.path.exists(os.path.join(build, 'CMakeCache.txt')) \
             or not os.path.exists(os.path.join(build, 'build.ninja')):
-        r = subprocess.run(['cmake', '-S', src, '-B', build, '-G', 'Ninja Multi-Config',
-                            f'-DCMAKE_C_COMPILER={cc}', f'-DCMAKE_CXX_COMPILER={cxx}',
+        r = subprocess.run(['cmake', '-S', src, '-B', build, '-G', 'Ninja Multi-Config', *compilers,
                             '-DVITA3K_DYNARMIC=' + ('OFF' if a.no_jit else 'ON'), '-DVITA3K_GAMES_ONLY=ON',
-                            # the Discord SDK's headers don't build with GCC 14 (no <cstdint>)
+                            # the Discord SDK's headers don't build with GCC 14 (no <cstdint>), and it
+                            # has no arm64 macOS library
                             '-DUSE_DISCORD_RICH_PRESENCE=OFF', f'-DPython3_EXECUTABLE={sys.executable}',
-                            f'-DCMAKE_EXE_LINKER_FLAGS={static}', f'-DCMAKE_SHARED_LINKER_FLAGS={static}'], env=env)
+                            *platform], env=env)
         if r.returncode:
             sys.exit('cmake configure failed')
     cmd = ['cmake', '--build', build, '--config', a.config]
