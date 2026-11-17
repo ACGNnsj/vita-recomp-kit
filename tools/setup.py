@@ -1,17 +1,21 @@
-"""The player's setup (make-setup.py lays it out; setup.bat runs it): from the player's own dump of
-the game to a playable folder. It downloads the PS Vita firmware from Sony and a compiler for the
-recompiled modules from LLVM's and Microsoft's servers, installs the game, recompiles its code and
-compiles it on this PC. Nothing of the game is ever uploaded or shared.
+"""The player's setup (make-setup.py lays it out; setup.bat or setup.sh runs it): from the player's own
+dump of the game to a playable folder. It downloads the PS Vita firmware from Sony and a compiler for
+the recompiled modules (Windows: from LLVM's and Microsoft's servers; Linux: zig, from ziglang.org),
+installs the game, recompiles its code and compiles it on this PC. Nothing of the game is ever
+uploaded or shared.
 
 usage (no arguments: a window asks, setupgui.py; --console: questions in the console):
-  setup.bat [--console]
-  setup.bat [--install <pkg|folder|zip|vpk> [--license <work.bin|rif> | --zrif Z]] ...
+  setup.bat|setup.sh [--console]
+  setup.bat|setup.sh [--install <pkg|folder|zip|vpk> [--license <work.bin|rif> | --zrif Z]] ...
             [--out DIR] [--cache DIR] [--accept-microsoft-license] [--jobs N] [--shortcut]
 
   --install   repeat for each part, in order: the game, then its update, then add-ons
   --out       the playable folder (default: <game id> next to the setup)
-  --cache     the downloads, shared by every game's setup (default %LOCALAPPDATA%\\vita-recomps)
-  --shortcut  put a shortcut to the game on the desktop
+  --cache     the downloads, shared by every game's setup (default %LOCALAPPDATA%\\vita-recomps; Linux:
+              ~/.cache/vita-recomps)
+  --accept-microsoft-license   Windows only: the compiler's C++ runtime and SDK
+  --shortcut  Windows: a shortcut on the desktop. Linux: an entry in the applications menu (which
+              Steam's "Add a Non-Steam Game" lists) and on the desktop
 """
 import json
 import os
@@ -21,6 +25,7 @@ import sys
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS)
 import toolchain  # noqa: E402
+from gameproject import EXE_SUFFIX, WINDOWS  # noqa: E402
 
 SETUP = os.path.dirname(os.path.dirname(TOOLS))
 GAME = os.path.join(SETUP, 'kit', 'game')  # the template the playable folder is made from
@@ -37,6 +42,35 @@ def desktop_shortcut(exe, name):
     r = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script], env=env,
                        capture_output=True, text=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     return r.stdout.strip() if r.returncode == 0 else ''
+
+
+def desktop_entry(exe, game, out):
+    """Linux: <id>.desktop in the applications menu and on the desktop; the menu entry's path."""
+    icon = os.path.join(out, game['id'] + '.png')
+    text = ('[Desktop Entry]\nType=Application\n'
+            f'Name={game["name"]}\nExec="{exe}"\nPath={out}\nTerminal=false\nCategories=Game;\n'
+            + (f'Icon={icon}\n' if os.path.exists(icon) else ''))
+    home = os.path.expanduser('~')
+    data = os.environ.get('XDG_DATA_HOME') or os.path.join(home, '.local', 'share')
+    made = []
+    for folder in (os.path.join(data, 'applications'), os.path.join(home, 'Desktop')):
+        if not os.path.isdir(os.path.dirname(folder)):
+            continue
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, game['id'] + '.desktop')
+        with open(path, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(text)
+        os.chmod(path, 0o755)  # KDE starts a desktop file from the desktop only when it is executable
+        made.append(path)
+    return made[0] if made else ''
+
+
+def default_cache():
+    """Where the downloads go, shared by every game's setup."""
+    if WINDOWS:
+        return os.path.join(os.environ.get('LOCALAPPDATA', SETUP), 'vita-recomps')
+    base = os.environ.get('XDG_CACHE_HOME') or os.path.join(os.path.expanduser('~'), '.cache')
+    return os.path.join(base, 'vita-recomps')
 
 
 def ask(prompt, default=''):
@@ -71,11 +105,12 @@ def main():
     with open(os.path.join(GAME, 'game.json'), encoding='utf-8') as f:
         game = json.load(f)
     default_out = os.path.join(os.path.dirname(SETUP), game['id'])
+    lock_path = os.path.join(TOOLS, 'toolchain-windows.json' if WINDOWS else 'toolchain-linux.json')
+    with open(lock_path, encoding='utf-8') as f:
+        lock = json.load(f)
     if not argv:
         import setupgui
-        with open(os.path.join(TOOLS, 'toolchain-windows.json'), encoding='utf-8') as f:
-            licence = json.load(f)['microsoft_license']
-        setupgui.Window(game, os.path.abspath(__file__), default_out, licence).run()
+        setupgui.Window(game, os.path.abspath(__file__), default_out, lock.get('microsoft_license')).run()
         return
     if argv == ['--console']:
         argv = []
@@ -104,13 +139,11 @@ def main():
     if interactive:
         parts = ask_parts(game)
     out = opts.get('--out') or (ask('\nPlayable folder', default_out) if interactive else default_out)
-    cache = opts.get('--cache') or os.path.join(os.environ.get('LOCALAPPDATA', SETUP), 'vita-recomps')
+    cache = opts.get('--cache') or default_cache()
     jobs = opts.get('--jobs') or str(max(1, min(os.cpu_count() or 4, 6)))
 
-    lock_path = os.path.join(TOOLS, 'toolchain-windows.json')
-    with open(lock_path, encoding='utf-8') as f:
-        lock = json.load(f)
-    accepted = bool(opts.get('--accept-microsoft-license'))
+    # nothing to accept on Linux: zig is MIT, its LLVM parts Apache
+    accepted = bool(opts.get('--accept-microsoft-license')) or 'microsoft_license' not in lock
     if not accepted:
         print('\nThe game\'s code is compiled on this PC with LLVM\'s clang and Microsoft\'s C++ runtime and\n'
               'Windows SDK, downloaded from Microsoft under Microsoft\'s licence (Visual Studio Build Tools):\n'
@@ -122,10 +155,13 @@ def main():
     py = [sys.executable, '-I', '-u']
     if subprocess.run(py + [os.path.join(TOOLS, 'fetch-firmware.py'), os.path.join(cache, 'firmware')]).returncode:
         sys.exit('downloading the firmware failed')
-    tc_dir = os.path.join(cache, 'toolchain')
-    if not os.path.exists(os.path.join(tc_dir, 'toolchain.json')) or \
-            json.load(open(os.path.join(tc_dir, 'toolchain.json'), encoding='utf-8')).get('msvc') != lock['msvc'] or \
-            json.load(open(os.path.join(tc_dir, 'toolchain.json'), encoding='utf-8')).get('llvm_mingw') != lock['llvm_mingw']:
+    tc_dir = os.path.join(cache, 'toolchain' if WINDOWS else 'toolchain-linux')
+    pinned = [k for k in ('msvc', 'llvm_mingw', 'zig') if k in lock]  # the versions the lock file pins
+    have = {}
+    if os.path.exists(os.path.join(tc_dir, 'toolchain.json')):
+        with open(os.path.join(tc_dir, 'toolchain.json'), encoding='utf-8') as f:
+            have = json.load(f)
+    if any(have.get(k) != lock[k] for k in pinned):
         toolchain.fetch(lock_path, tc_dir, True)
 
     print(f'\n2/3 installing the game, recompiling and compiling its code into {out} (several minutes)')
@@ -135,10 +171,13 @@ def main():
     if r.returncode:
         sys.exit('the setup failed (see above)')
 
-    exe = os.path.join(out, game['id'] + '.exe')
-    if opts.get('--shortcut'):
+    exe = os.path.join(out, game['id'] + EXE_SUFFIX)
+    if opts.get('--shortcut') and WINDOWS:
         lnk = desktop_shortcut(exe, game['name'])
         print(f'desktop shortcut: {lnk}' if lnk else 'the desktop shortcut could not be made')
+    elif opts.get('--shortcut'):
+        entry = desktop_entry(exe, game, out)
+        print(f'applications menu entry: {entry}' if entry else 'the menu entry could not be made')
     print(f'\n3/3 done: the game is in {out}. Start {exe}')
 
 

@@ -36,10 +36,10 @@ directories and passes their paths in.
 | `tools/leak-scan.py` | pre-push hook (`install <repo>`) or `check <range>`: blocks game-data files, big files, licence strings, tokens, user folders and the owner's private patterns (`git config leakscan.patterns <file>`, kept outside the repo) from reaching a remote |
 | `tools/build-vita3k.py` | builds a game project's `third_party/vita3k` with MSVC + Ninja into `build/vita3k` (`msvc.py` finds MSVC with vswhere); `--games-only`: the single-game executables without Vita3K's Qt interface (no Qt needed) |
 | `tools/build-recomp.py` | builds a game project's `generated/<module>/` into `ssd_aot_<module>.dll`: MSVC + CMake + Ninja, or `--toolchain <dir>` without any of them |
-| `tools/toolchain.py`, `tools/toolchain-windows.json` | a compiler for the modules that needs no Visual Studio: llvm-mingw's clang-cl and lld-link with Microsoft's C++ runtime and Windows SDK downloaded from Microsoft's Visual Studio manifest, every file pinned by SHA-256 in the lock file; also the VC++ runtime DLLs a playable folder carries |
+| `tools/toolchain.py`, `tools/toolchain-windows.json`, `tools/toolchain-linux.json` | a compiler for the modules that needs no Visual Studio: llvm-mingw's clang-cl and lld-link with Microsoft's C++ runtime and Windows SDK downloaded from Microsoft's Visual Studio manifest, every file pinned by SHA-256 in the lock file; also the VC++ runtime DLLs a playable folder carries. Linux: zig |
 | `tools/install-game.py`, `tools/make-dist.py` | from the player's dump (firmware, game, patch, add-ons; pkgs with their licence) to a playable folder `dist/<name>/`, as the game's `game.json` describes it (`gameproject.py`); `--bin`, `--toolchain`, `--out` for a prebuilt front end, the downloaded toolchain and any folder |
 | `tools/fetch-firmware.py` | the PS Vita firmware Vita3K needs (3.74 and the font package) from Sony's update servers, checked by SHA-256 |
-| `tools/make-setup.py`, `tools/setup-windows.json`, `tools/setup.py` | a game's setup for players: Python's embeddable distribution (with capstone and PyYAML, pinned), the kit, the game's front end; `setup.py` runs on the player's PC (see below) |
+| `tools/make-setup.py`, `tools/setup-windows.json`, `tools/setup-linux.json`, `tools/setup.py` | a game's setup for players: Python (Windows: the embeddable distribution; Linux: python-build-standalone) with capstone and PyYAML (pinned), the kit, the game's front end; `setup.py` runs on the player's computer (see below) |
 
 ## Tools
 
@@ -146,3 +146,33 @@ installed, so it isn't meant to be started.
 `make-setup.py` refuses to write a setup that holds anything that looks
 like game data (ELFs, pkgs, PUPs, licences, recompiled modules, saves,
 logs).
+
+### Linux (and the Steam Deck)
+
+The fork builds the games' front ends on Linux as `<id>.x86_64`
+(`build-vita3k.py` on Linux: the games only, GCC, libstdc++ linked in; run
+it with Python 3.12 or newer). Built in the Steam Runtime 3 (sniper) SDK,
+they need glibc 2.30, zlib and Vulkan, nothing else. The modules are
+`ssd_aot_<module>.so`.
+
+The toolchain is zig alone (`tools/toolchain-linux.json`, 57 MB): clang with
+libc++ and glibc's link stubs, MIT and Apache licences, nothing to accept.
+`toolchain.py fetch tools/toolchain-linux.json <dir>` unpacks it, and
+`build-recomp.py --toolchain <dir>` and the setup compile with it (target
+`x86_64-linux-gnu.2.30`, baseline CPU; each module exports only
+`armrecomp_aot_init`).
+
+```
+python3.12 -I tools/build-vita3k.py --project <game> --target <id>   # -> <game>/build/vita3k-games
+python3.12 -I tools/make-setup.py build tools/setup-linux.json --project <game> \
+       --bin <game>/build/vita3k-games/bin/RelWithDebInfo --out <dir>/<game>-setup-linux --zip
+python3.12 -I tools/make-setup.py resolve-linux tools/setup-linux.json <tag>   # maintainers
+```
+
+The Linux setup is a `.tar.gz`: `setup.sh`, python-build-standalone's
+CPython 3.12 (Tk included, for the same window) with the wheels, the kit
+and the front end (its debug information stripped). It downloads into
+`~/.cache/vita-recomps` and works as on Windows; `--shortcut` makes a
+desktop entry (applications menu and desktop), which Steam's "Add a
+Non-Steam Game" lists. Soul Sacrifice Delta on a Steam Deck: 20 min from
+the dump to the playable folder, 14 of them compiling (6 jobs).

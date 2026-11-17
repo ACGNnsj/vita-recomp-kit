@@ -23,7 +23,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gameproject import Project  # noqa: E402
+from gameproject import MODULE_SUFFIX, WINDOWS, Project  # noqa: E402
 
 
 def main():
@@ -64,6 +64,9 @@ def main():
     if a.redist:
         for f in glob.glob(os.path.join(a.redist, 'msvcp140*.dll')) + glob.glob(os.path.join(a.redist, 'vcruntime140*.dll')):
             shutil.copy2(f, out)
+    # Linux: the icon a desktop entry shows
+    if os.path.exists(os.path.join(bin_dir, p.id + '.png')):
+        shutil.copy2(os.path.join(bin_dir, p.id + '.png'), out)
     # static assets Vita3K reads next to the executable
     for d in ('data', 'shaders-builtin', 'icons'):
         if os.path.isdir(os.path.join(bin_dir, d)):
@@ -72,9 +75,9 @@ def main():
     # the recompiled modules
     if not a.no_recompiled:
         rdir = a.recompiled_dir or os.path.join(p.root, 'build', 'recomp')
-        mods = glob.glob(os.path.join(rdir, 'ssd_aot_*.dll'))
+        mods = glob.glob(os.path.join(rdir, 'ssd_aot_*' + MODULE_SUFFIX))
         if not mods:
-            print(f'warning: no ssd_aot_*.dll in {rdir}: everything will run on the JIT')
+            print(f'warning: no ssd_aot_*{MODULE_SUFFIX} in {rdir}: everything will run on the JIT')
         for m in mods:
             shutil.copy2(m, out)
 
@@ -82,7 +85,7 @@ def main():
     ini = os.path.join(out, p.id + '.ini')
     if not os.path.exists(ini):
         if subprocess.run([exe, '--write-ini', ini], cwd=bin_dir).returncode or not os.path.exists(ini):
-            sys.exit(f'{p.id}.exe --write-ini failed')
+            sys.exit(f'{p.exe_name} --write-ini failed')
         if a.vita_fs:
             with open(ini, encoding='utf-8') as f:
                 lines = f.read().splitlines(keepends=True)
@@ -94,8 +97,10 @@ def main():
     if p.dist_readme:
         shutil.copy2(os.path.join(p.root, p.dist_readme), os.path.join(out, 'README.txt'))
     for fname, text in p.dist_files.items():
-        with open(os.path.join(out, fname), 'w', encoding='utf-8', newline='\r\n') as f:
+        with open(os.path.join(out, fname), 'w', encoding='utf-8', newline='\r\n' if WINDOWS else '\n') as f:
             f.write(text)
+        if not WINDOWS:
+            os.chmod(os.path.join(out, fname), 0o755)  # a launcher script
 
     size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(out) for f in fs)
     print(f'{out}: {size / 2**20:,.0f} MB')

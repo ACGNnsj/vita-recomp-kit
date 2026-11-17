@@ -1,0 +1,30 @@
+{
+ "schema": "vita-recomp-kit.setup.v1",
+ "platform": "linux",
+ "python": "3.12.16",
+ "python_build_standalone": "20261026",
+ "wheels": {
+  "capstone": "5.0.7",
+  "PyYAML": "6.0.3"
+ },
+ "files": [
+  {
+   "kind": "python",
+   "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-x86_64-unknown-linux-gnu-install_only.tar.gz",
+   "sha256": "6a79e922e50006b601f29e688407659da1c2b86ebcd4e9c7254cf234be8b89de",
+   "size": 67921566
+  },
+  {
+   "kind": "wheel",
+   "url": "https://files.pythonhosted.org/packages/15/3e/3a4f45dd4eda6fc8051f76bf3ed50ead6040d827000371211fbaaf057625/capstone-5.0.7-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+   "sha256": "b809a9654844ce0d35099121a851ddd2ab2689df1ff6687037babcedcaae6391",
+   "size": 1482184
+  },
+  {
+   "kind": "wheel",
+   "url": "https://files.pythonhosted.org/packages/8b/9d/b3589d3877982d4f2329302ef98a8026e7f4443c765c46cfecc8858c6b4b/pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "sha256": "ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc",
+   "size": 807870
+  }
+ ]
+}

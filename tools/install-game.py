@@ -29,6 +29,7 @@ import argparse
 import glob
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -83,9 +84,17 @@ def main():
     os.makedirs(fs, exist_ok=True)
     os.makedirs(work, exist_ok=True)
 
-    def front_end(args, extra_env=None):
+    def front_end(args, extra_env=None, drop=None):
+        """Run the front end; output lines matching drop are left out."""
         env = dict(os.environ, **(extra_env or {}))
-        return subprocess.run([exe, '--vita-fs', fs] + args, cwd=bin_dir, env=env).returncode
+        if not drop:
+            return subprocess.run([exe, '--vita-fs', fs] + args, cwd=bin_dir, env=env).returncode
+        proc = subprocess.Popen([exe, '--vita-fs', fs] + args, cwd=bin_dir, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, errors='replace')
+        for line in proc.stdout:
+            if not drop.search(line):
+                sys.stdout.write(line)
+        return proc.wait()
 
     # 1. firmware and game
     args = []
@@ -116,7 +125,9 @@ def main():
             os.remove(old)
         seconds = a.dump_seconds or p.dump_seconds
         print(f'running the game for {seconds} s to write the modules')
-        front_end(['--dump-elfs', str(seconds)], {'SSD_AOT': 'none', 'SSD_AOT_NATIVE': '0'})
+        # on the JIT; dynarmic notes every memory fault it passes on to Vita3K (Linux: thousands, harmless)
+        front_end(['--dump-elfs', str(seconds)], {'SSD_AOT': 'none', 'SSD_AOT_NATIVE': '0'},
+                  re.compile(r'^Unhandled SIG(SEGV|BUS) at '))
         elf_dir = os.path.join(work, 'elf')
         os.makedirs(elf_dir, exist_ok=True)
         for m in p.modules:
@@ -155,7 +166,8 @@ def main():
     dist = [sys.executable, '-I', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'make-dist.py'),
             '--project', p.root, '--out', out]
     dist += ['--bin', bin_dir] if a.bin else []
-    dist += ['--redist', os.path.join(a.toolchain, 'redist')] if a.toolchain else []
+    # the VC++ runtime DLLs (the Windows toolchain only)
+    dist += ['--redist', os.path.join(a.toolchain, 'redist')] if a.toolchain and os.path.isdir(os.path.join(a.toolchain, 'redist')) else []
     dist += ['--recompiled-dir', recompiled_dir] if not a.no_recompile and p.modules else ['--no-recompiled']
     dist += ['--no-jit'] if a.no_jit else []
     sys.exit(subprocess.run(dist).returncode)

@@ -14,8 +14,14 @@ usage:
 <dir> then holds llvm/bin/{clang-cl,lld-link,llvm-lib}.exe, msvc/{include,lib/x64},
 sdk/{Include,Lib}/<version>/ and redist/ (the VC++ runtime DLLs a game's folder carries, as Microsoft
 allows for an application's own folder). build-recomp.py --toolchain <dir> builds the recompiled modules with it.
+
+Linux (toolchain-linux.json): the toolchain is zig alone, a self-contained clang with libc++ and
+glibc's link stubs, under MIT and LLVM's Apache licence (nothing to accept). fetch unpacks it into
+<dir>/zig/, and the modules come out as ssd_aot_<module>.so; zig keeps what it builds on first use
+(libc++) in <dir>/cache/.
+  python -I toolchain.py fetch toolchain-linux.json <dir>
 """
-import concurrent.futures, glob, hashlib, json, os, re, shutil, subprocess, sys, tempfile, urllib.request, zipfile
+import concurrent.futures, glob, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile, urllib.request, zipfile
 
 CHANNEL = 'https://aka.ms/vs/17/release/channel'
 MICROSOFT_LICENSE = 'https://go.microsoft.com/fwlink/?LinkId=2179911'  # Visual Studio Build Tools
@@ -40,6 +46,14 @@ CXXFLAGS = ['/nologo', '/TP', '/DWIN32', '/D_WINDOWS', '/EHsc', '/O2', '/Ob2', '
 GEN_FLAGS = ['/bigobj', '/O1', '/w', '/DRECOMP_COUNT_INSNS']
 SYSTEM_LIBS = ['kernel32.lib', 'user32.lib', 'gdi32.lib', 'winspool.lib', 'shell32.lib', 'ole32.lib',
                'oleaut32.lib', 'uuid.lib', 'comdlg32.lib', 'advapi32.lib']
+# Linux: zig's clang, which brings libc++ and the glibc stubs to link against (no sysroot). The target
+# glibc is the oldest the front end needs too; the baseline CPU keeps clang to what the Windows build
+# and GCC assume (no FMA contraction, no AVX)
+ZIG_TARGET = ['-target', 'x86_64-linux-gnu.2.30', '-mcpu=baseline']
+ZIG_CXXFLAGS = ['-std=c++20', '-O2', '-fPIC', '-fvisibility=hidden', '-fvisibility-inlines-hidden', '-DNDEBUG']
+ZIG_GEN_FLAGS = ['-O1', '-w', '-DRECOMP_COUNT_INSNS']
+# a module exports its entry point and nothing else (libc++'s operator new/delete stay inside)
+ZIG_EXPORTS = '{\n  global: armrecomp_aot_init;\n  local: *;\n};\n'
 # what a build needs from llvm-mingw: the real compiler (bin/clang.exe there is a wrapper that reads a
 # MinGW target from its name), the linker, the librarian, the DLLs they load and clang's headers
 LLVM_KEEP = re.compile(r'^[^/]+/(bin/(clang-\d+|ld\.lld|llvm-ar)\.exe|bin/[^/]+\.dll|lib/clang/\d+/include/.+)$')
@@ -115,13 +129,8 @@ def resolve(lock_path):
           f'{len(payloads)} files, {lock["download_bytes"] / 2**20:,.0f} MB')
 
 
-def fetch(lock_path, dest, accepted):
-    lock = json.load(open(lock_path, encoding='utf-8'))
-    if not accepted:
-        sys.exit('The toolchain includes Microsoft\'s C++ runtime and Windows SDK, under Microsoft\'s licence:\n'
-                 f'  {lock["microsoft_license"]}\nRead it, then run again with --accept-microsoft-license.')
-    dest = os.path.abspath(dest)
-    cache = os.path.join(dest, 'downloads')
+def download(lock, cache):
+    """Every payload of a lock file into cache/, checked against its SHA-256 (kept if already there)."""
     os.makedirs(cache, exist_ok=True)
     total = sum(p['size'] for p in lock['payloads'])
     done = 0
@@ -134,6 +143,38 @@ def fetch(lock_path, dest, accepted):
                 sys.exit(f'{p["file"]}: wrong SHA-256 (the download changed or was damaged)')
         done += p['size']
         print(f'  {done / 2**20:,.0f} / {total / 2**20:,.0f} MB  {p["file"]}', flush=True)
+
+
+def fetch_zig(lock, dest):
+    """Linux: zig (MIT; LLVM's clang and libc++ inside, under their Apache licence) into dest/zig."""
+    download(lock, os.path.join(dest, 'downloads'))
+    payload = next(p for p in lock['payloads'] if p['kind'] == 'zig')
+    zig_dir = os.path.join(dest, 'zig')
+    shutil.rmtree(zig_dir, ignore_errors=True)
+    os.makedirs(zig_dir)
+    with tarfile.open(os.path.join(dest, 'downloads', payload['file'])) as t:
+        members = []
+        for m in t.getmembers():
+            parts = m.name.split('/', 1)
+            if len(parts) == 2 and parts[1]:
+                m.name = parts[1]  # without the top folder (zig-x86_64-linux-<version>/)
+                members.append(m)
+        t.extractall(zig_dir, members, filter='tar')
+    with open(os.path.join(dest, 'toolchain.json'), 'w', encoding='utf-8', newline='\n') as f:
+        json.dump({k: lock[k] for k in ('schema', 'zig')}, f, indent=1)
+    print(f'{dest}: zig {lock["zig"]}')
+
+
+def fetch(lock_path, dest, accepted):
+    lock = json.load(open(lock_path, encoding='utf-8'))
+    if 'zig' in lock:
+        return fetch_zig(lock, os.path.abspath(dest))
+    if not accepted:
+        sys.exit('The toolchain includes Microsoft\'s C++ runtime and Windows SDK, under Microsoft\'s licence:\n'
+                 f'  {lock["microsoft_license"]}\nRead it, then run again with --accept-microsoft-license.')
+    dest = os.path.abspath(dest)
+    cache = os.path.join(dest, 'downloads')
+    download(lock, cache)
 
     # the MSVC runtime: VSIX archives (zip), Contents/VC/Tools/MSVC/<version>/{include,lib/x64}
     msvc_dir = os.path.join(dest, 'msvc')
@@ -228,9 +269,72 @@ def run(cmd, env, rsp=None):
     return (r.stdout + r.stderr).strip() if r.returncode else None
 
 
+def compile_all(work, env, jobs):
+    """Run the compile commands in work, jobs at a time; stop at the first failure."""
+    print(f'{len(work)} files to compile')
+    done = 0
+    with concurrent.futures.ThreadPoolExecutor(jobs) as pool:
+        for cmd, err in zip(work, pool.map(lambda c: run(c, env), work)):
+            done += 1
+            if err is not None:
+                pool.shutdown(cancel_futures=True)
+                sys.exit(f'{cmd[-3]}: compile failed\n{err}')
+            if done % 25 == 0 or done == len(work):
+                print(f'  {done}/{len(work)}', flush=True)
+
+
+def build_modules_zig(gen, modules, build, toolchain_dir, jobs=4, defines=()):
+    """Linux: generated/<module>/ into <build>/ssd_aot_<module>.so with zig's clang."""
+    zig = os.path.join(os.path.abspath(toolchain_dir), 'zig', 'zig')
+    # zig keeps the libc++ it builds on first use in its cache: the toolchain's own folder
+    cache = os.path.join(os.path.abspath(toolchain_dir), 'cache')
+    env = dict(os.environ, ZIG_GLOBAL_CACHE_DIR=cache, ZIG_LOCAL_CACHE_DIR=cache)
+    headers = max(os.path.getmtime(h) for h in glob.glob(os.path.join(RUNTIME, '*.h')))
+    cxx = [zig, 'c++', *ZIG_TARGET, *ZIG_CXXFLAGS]
+
+    work = []
+    for m in modules:
+        obj_dir = os.path.join(build, 'obj', m)
+        os.makedirs(obj_dir, exist_ok=True)
+        newest = max(headers, *(os.path.getmtime(h) for h in glob.glob(os.path.join(gen, m, '*.h'))))
+        for src in sorted(glob.glob(os.path.join(gen, m, '*.cpp'))):
+            obj = os.path.join(obj_dir, os.path.basename(src)[:-4] + '.o')
+            if not os.path.exists(obj) or os.path.getmtime(obj) < max(newest, os.path.getmtime(src)):
+                work.append([*cxx, *ZIG_GEN_FLAGS, *(f'-D{d}' for d in defines), '-I', RUNTIME,
+                             '-I', os.path.join(gen, m), '-c', src, '-o', obj])
+    entry = os.path.join(build, 'obj', 'aot_dll.o')
+    if not os.path.exists(entry) or os.path.getmtime(entry) < max(headers, os.path.getmtime(os.path.join(RUNTIME, 'aot_dll.cpp'))):
+        work.append([*cxx, '-I', RUNTIME, '-c', os.path.join(RUNTIME, 'aot_dll.cpp'), '-o', entry])
+    compile_all(work, env, jobs)
+
+    exports = os.path.join(build, 'exports.map')
+    with open(exports, 'w', encoding='utf-8', newline='\n') as f:
+        f.write(ZIG_EXPORTS)
+    for m in modules:
+        objs = sorted(glob.glob(os.path.join(build, 'obj', m, '*.o')))
+        lib = os.path.join(build, f'libgen_{m}.a')
+        so = os.path.join(build, f'{DLL_PREFIX}{m}.so')
+        if os.path.exists(so) and os.path.getmtime(so) >= max(os.path.getmtime(o) for o in objs + [entry]):
+            continue
+        if os.path.exists(lib):
+            os.remove(lib)  # ar adds to an existing archive
+        err = run([zig, 'ar', 'rcs', lib, *objs], env)
+        if err is None:
+            err = run([zig, 'c++', *ZIG_TARGET, '-shared', f'-Wl,--version-script,{exports}', '-Wl,--gc-sections',
+                       '-s', '-o', so, entry, lib], env)
+        if err is not None:
+            sys.exit(f'{m}: linking failed\n{err}')
+    # zig's cache holds a copy of every object (1.5 GB for Soul Sacrifice Delta) besides libc++:
+    # the objects are in <build>/obj already, and libc++ is rebuilt in a minute when needed again
+    shutil.rmtree(cache, ignore_errors=True)
+
+
 def build_modules(gen, modules, build, toolchain_dir, jobs=4, defines=()):
-    """Compile generated/<module>/ into <build>/ssd_aot_<module>.dll with the toolchain in toolchain_dir.
-    defines: extra preprocessor definitions for the generated code (RECOMP_BISECT)."""
+    """Compile generated/<module>/ into <build>/ssd_aot_<module>.dll (Windows; .so with zig on Linux)
+    with the toolchain in toolchain_dir. defines: extra preprocessor definitions for the generated
+    code (RECOMP_BISECT)."""
+    if os.path.exists(os.path.join(toolchain_dir, 'zig', 'zig')):
+        return build_modules_zig(gen, modules, build, toolchain_dir, jobs, defines)
     tc = environment(toolchain_dir)
     env = dict(os.environ, INCLUDE=tc['INCLUDE'], LIB=tc['LIB'])
     env['PATH'] = tc['path'] + os.pathsep + env.get('PATH', '')

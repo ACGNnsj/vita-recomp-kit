@@ -1,16 +1,22 @@
-"""The setup's window (Tk): asks for the dump's parts, the playable folder and Microsoft's licence, then
-runs setup.py with them in a hidden console and shows its progress. setup.py stays the one place that
-does the work, so the window and the command line do the same thing.
+"""The setup's window (Tk): asks for the dump's parts, the playable folder and (Windows) Microsoft's
+licence, then runs setup.py with them in a hidden console and shows its progress. setup.py stays the
+one place that does the work, so the window and the command line do the same thing.
 """
 import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import threading
 import tkinter as tk
 import webbrowser
 from tkinter import filedialog, messagebox, ttk
+
+from gameproject import EXE_SUFFIX, WINDOWS
+
+# a console of its own that no one sees, which every program the setup starts shares (Windows)
+NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 STAGES = [
     # (pattern in setup.py's output, what the window says)
@@ -79,7 +85,9 @@ class Part:
 
 class Window:
     def __init__(self, game, setup_py, default_out, licence_url):
+        """licence_url: Microsoft's licence the Windows compiler needs accepted; None when there is none."""
         self.game = game
+        self.exe_name = game['id'] + EXE_SUFFIX
         self.setup_py = setup_py
         self.root = tk.Tk()
         self.root.title(f'{game["name"]}: setup')
@@ -87,7 +95,7 @@ class Window:
         self.lines = queue.Queue()
         self.proc = None
         self.out = tk.StringVar(value=default_out)
-        self.accepted = tk.BooleanVar()
+        self.accepted = tk.BooleanVar(value=licence_url is None)
         self.shortcut = tk.BooleanVar(value=True)
         self.stage = tk.StringVar(value='')
         self.extra_args = []  # more setup.py arguments (tests: --cache)
@@ -123,15 +131,18 @@ class Window:
         ttk.Entry(where, textvariable=self.out).grid(row=0, column=1, sticky='ew')
         ttk.Button(where, text='Browse...', command=self.pick_out).grid(row=0, column=2, padx=2)
 
-        lic = ttk.Frame(f)
-        lic.grid(sticky='w', pady=(10, 0))
-        ttk.Checkbutton(lic, variable=self.accepted, text='I accept Microsoft\'s licence for the C++ runtime and '
-                        'Windows SDK the compiler uses').grid(row=0, column=0)
-        link = ttk.Label(lic, text='(read it)', foreground='blue', cursor='hand2')
-        link.grid(row=0, column=1, padx=4)
-        link.bind('<Button-1>', lambda e: webbrowser.open(licence_url))
-        ttk.Checkbutton(f, variable=self.shortcut, text='Put a shortcut to the game on the desktop').grid(
-            sticky='w', pady=(4, 0))
+        if licence_url:
+            lic = ttk.Frame(f)
+            lic.grid(sticky='w', pady=(10, 0))
+            ttk.Checkbutton(lic, variable=self.accepted, text='I accept Microsoft\'s licence for the C++ runtime '
+                            'and Windows SDK the compiler uses').grid(row=0, column=0)
+            link = ttk.Label(lic, text='(read it)', foreground='blue', cursor='hand2')
+            link.grid(row=0, column=1, padx=4)
+            link.bind('<Button-1>', lambda e: webbrowser.open(licence_url))
+        shortcut = ('Put a shortcut to the game on the desktop' if WINDOWS else
+                    'Add the game to the applications menu and the desktop (Steam\'s "Add a Non-Steam Game" '
+                    'lists it)')
+        ttk.Checkbutton(f, variable=self.shortcut, text=shortcut).grid(sticky='w', pady=(4, 0))
 
         buttons = ttk.Frame(f)
         buttons.grid(sticky='ew', pady=(12, 0))
@@ -192,21 +203,25 @@ class Window:
             messagebox.showerror('Setup', 'The compiler needs Microsoft\'s licence accepted.')
             return
         out = self.out.get().strip()
-        if os.path.exists(os.path.join(out, self.game['id'] + '.exe')) and not messagebox.askyesno(
+        if os.path.exists(os.path.join(out, self.exe_name)) and not messagebox.askyesno(
                 'Setup', f'{out} already holds the game. Install over it? (Saves in it are kept.)'):
             return
         args = [a for p in parts for a in p.args()]
-        cmd = [os.path.join(os.path.dirname(sys.executable), 'python.exe'), '-I', '-u', self.setup_py,
-               *args, '--out', out, '--accept-microsoft-license', *self.extra_args]
+        # Windows: python.exe beside the pythonw.exe that runs the window, for a console the setup's
+        # programs share; Linux: the same interpreter
+        python = os.path.join(os.path.dirname(sys.executable), 'python.exe') if WINDOWS else sys.executable
+        cmd = [python, '-I', '-u', self.setup_py, *args, '--out', out, *self.extra_args]
+        if WINDOWS:
+            cmd.append('--accept-microsoft-license')
         if self.shortcut.get():
             cmd.append('--shortcut')
         self.install['state'] = 'disabled'
         self.bar['value'] = 0
         self.stage.set(STAGES[0][1])
-        # a hidden console, which every program the setup starts shares
+        # Windows: a hidden console; Linux: a process group of its own, so Close can stop all of it
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                      encoding='utf-8', errors='replace',
-                                     creationflags=subprocess.CREATE_NO_WINDOW)
+                                     creationflags=NO_WINDOW, start_new_session=not WINDOWS)
         threading.Thread(target=self.read, daemon=True).start()
         self.root.after(100, self.poll)
 
@@ -245,17 +260,25 @@ class Window:
 
     def launch(self):
         out = self.out.get().strip()
-        subprocess.Popen([os.path.join(out, self.game['id'] + '.exe')], cwd=out)
+        subprocess.Popen([os.path.join(out, self.exe_name)], cwd=out)
 
     def open_folder(self):
-        os.startfile(self.out.get().strip())
+        if WINDOWS:
+            os.startfile(self.out.get().strip())
+        else:
+            subprocess.Popen(['xdg-open', self.out.get().strip()])
 
     def close(self):
         if self.proc and not messagebox.askyesno('Setup', 'The setup is still running. Stop it?'):
             return
-        if self.proc:
+        if self.proc and WINDOWS:
             subprocess.run(['taskkill', '/T', '/F', '/PID', str(self.proc.pid)], capture_output=True,
-                           creationflags=subprocess.CREATE_NO_WINDOW)
+                           creationflags=NO_WINDOW)
+        elif self.proc:
+            try:
+                os.killpg(self.proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         self.root.destroy()
 
     def run(self):

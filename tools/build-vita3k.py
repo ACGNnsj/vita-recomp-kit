@@ -13,10 +13,15 @@ usage:
               (VITA3K_GAMES_ONLY=ON: no Qt needed), into build/vita3k-games[-nojit]
   --target    build only these targets (e.g. shinobido2), default everything
   --qt        Qt 6 (MSVC x64) for Vita3K's interface; default Qt6_ROOT, or the newest C:/Qt/<v>/msvc*_64
+
+On Linux it builds the games only (as --games-only) with GCC, g++-14 when there is one (the Steam
+Runtime sniper SDK's), and libstdc++ linked in; the executables are <id>.x86_64. Run it with Python
+3.12 or newer (Vita3K's language catalog generator needs it).
 """
 import argparse
 import glob
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -29,6 +34,38 @@ def find_qt():
     versions = sorted(glob.glob(r'C:\Qt\[0-9]*\msvc20*_64'),
                       key=lambda d: [int(x) for x in os.path.basename(os.path.dirname(d)).split('.') if x.isdigit()])
     return versions[-1] if versions else ''
+
+
+def build_linux(a, src):
+    """Linux: the games only (no Qt), with GCC (g++-14 when there is one: the Steam Runtime sniper
+    SDK's), libstdc++ and libgcc linked in, into build/vita3k-games[-nojit]."""
+    if sys.version_info < (3, 12):
+        sys.exit('Vita3K\'s language catalog generator needs Python 3.12 or newer: run this with one')
+    root = os.path.abspath(a.project)
+    build = os.path.join(root, 'build', 'vita3k-games' + ('-nojit' if a.no_jit else ''))
+    env = dict(os.environ, CMAKE_POLICY_VERSION_MINIMUM='3.5')
+    cc, cxx = ('gcc-14', 'g++-14') if shutil.which('g++-14') else ('gcc', 'g++')
+    cc, cxx = env.get('CC', cc), env.get('CXX', cxx)
+    static = '-static-libstdc++ -static-libgcc'
+    if a.reconfigure or not os.path.exists(os.path.join(build, 'CMakeCache.txt')) \
+            or not os.path.exists(os.path.join(build, 'build.ninja')):
+        r = subprocess.run(['cmake', '-S', src, '-B', build, '-G', 'Ninja Multi-Config',
+                            f'-DCMAKE_C_COMPILER={cc}', f'-DCMAKE_CXX_COMPILER={cxx}',
+                            '-DVITA3K_DYNARMIC=' + ('OFF' if a.no_jit else 'ON'), '-DVITA3K_GAMES_ONLY=ON',
+                            # the Discord SDK's headers don't build with GCC 14 (no <cstdint>)
+                            '-DUSE_DISCORD_RICH_PRESENCE=OFF', f'-DPython3_EXECUTABLE={sys.executable}',
+                            f'-DCMAKE_EXE_LINKER_FLAGS={static}', f'-DCMAKE_SHARED_LINKER_FLAGS={static}'], env=env)
+        if r.returncode:
+            sys.exit('cmake configure failed')
+    cmd = ['cmake', '--build', build, '--config', a.config]
+    if a.jobs:
+        cmd += ['-j', str(a.jobs)]
+    if a.target:
+        cmd += ['--target'] + a.target
+    start = time.time()
+    if subprocess.run(cmd, env=env).returncode:
+        sys.exit('build failed')
+    print(f'build ({a.config}) finished in {(time.time() - start) / 60:.1f} min: {os.path.join(build, "bin", a.config)}')
 
 
 def main():
@@ -49,6 +86,8 @@ def main():
     if not os.path.exists(os.path.join(src, 'external', 'dynarmic', 'CMakeLists.txt')):
         sys.exit(f'submodules missing under {src}: git submodule update --init --recursive')
 
+    if sys.platform != 'win32':
+        return build_linux(a, src)
     env = msvc.environment()
     # Qt 6 for Vita3K's own interface (Vita3K.exe), which the build includes: Qt6_ROOT, --qt, or the
     # newest C:/Qt/<version>/msvc20*_64 (aqtinstall's and the Qt installer's layout)
