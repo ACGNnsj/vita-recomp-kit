@@ -45,8 +45,9 @@ foreach(module IN LISTS RECOMP_MODULES)
         # huge functions: /bigobj; keep optimisation moderate (compile time and memory)
         target_compile_options(gen_${module} PRIVATE /bigobj /O1 /w)
     else()
-        # the same moderate optimisation; the archive goes into a shared library
-        target_compile_options(gen_${module} PRIVATE -O1 -w)
+        # the same moderate optimisation; the archive goes into a shared library. No contraction:
+        # ARMv7's vmla/vmls round twice, and arm64 hosts have fmadd for the compiler to fuse into
+        target_compile_options(gen_${module} PRIVATE -O1 -w -ffp-contract=off)
         set_target_properties(gen_${module} PROPERTIES POSITION_INDEPENDENT_CODE ON
             CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
     endif()
@@ -98,9 +99,13 @@ if(RECOMP_TESTS AND EXISTS "${test_dir}/tests.cpp")
     target_link_libraries(recomp_tests PRIVATE
         "${dyn}/src/dynarmic/${VITA3K_CONFIG}/${pre}dynarmic${suf}"
         "${dyn}/externals/mcl/src/${VITA3K_CONFIG}/${pre}mcl${suf}"
-        "${dyn}/externals/zydis/${VITA3K_CONFIG}/${pre}Zydis${suf}"
-        "${dyn}/externals/zydis/zycore/${VITA3K_CONFIG}/${pre}Zycore${suf}"
         "${VITA3K_BUILD}/external/fmt/${VITA3K_CONFIG}/${pre}fmt${suf}")
+    # Zydis (the x64 backend's disassembler) only on x86-64 hosts; arm64's oaknut is header-only
+    if(EXISTS "${dyn}/externals/zydis/${VITA3K_CONFIG}/${pre}Zydis${suf}")
+        target_link_libraries(recomp_tests PRIVATE
+            "${dyn}/externals/zydis/${VITA3K_CONFIG}/${pre}Zydis${suf}"
+            "${dyn}/externals/zydis/zycore/${VITA3K_CONFIG}/${pre}Zycore${suf}")
+    endif()
     if(MSVC)
         target_compile_options(recomp_tests PRIVATE /bigobj /EHsc)
     endif()

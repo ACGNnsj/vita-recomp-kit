@@ -51,7 +51,8 @@ SYSTEM_LIBS = ['kernel32.lib', 'user32.lib', 'gdi32.lib', 'winspool.lib', 'shell
 # and GCC assume (no FMA contraction, no AVX)
 ZIG_TARGET = ['-target', 'x86_64-linux-gnu.2.30', '-mcpu=baseline']
 ZIG_CXXFLAGS = ['-std=c++20', '-O2', '-fPIC', '-fvisibility=hidden', '-fvisibility-inlines-hidden', '-DNDEBUG']
-ZIG_GEN_FLAGS = ['-O1', '-w', '-DRECOMP_COUNT_INSNS']
+# no contraction, as in recomp/CMakeLists.txt: ARMv7's vmla/vmls round twice (it matters on arm64 hosts)
+ZIG_GEN_FLAGS = ['-O1', '-w', '-ffp-contract=off', '-DRECOMP_COUNT_INSNS']
 # a module exports its entry point and nothing else (libc++'s operator new/delete stay inside)
 ZIG_EXPORTS = '{\n  global: armrecomp_aot_init;\n  local: *;\n};\n'
 # what a build needs from llvm-mingw: the real compiler (bin/clang.exe there is a wrapper that reads a
