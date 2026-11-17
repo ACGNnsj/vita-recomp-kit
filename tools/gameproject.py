@@ -20,11 +20,30 @@ game.json:
 """
 import json
 import os
+import struct
 import sys
 
 WINDOWS = sys.platform == 'win32'
 EXE_SUFFIX = '.exe' if WINDOWS else '.x86_64'  # the fork's add_game names it <id>.x86_64 on Linux
 MODULE_SUFFIX = '.dll' if WINDOWS else '.so'   # ssd_aot_<module>.dll / .so
+
+
+def ico_to_png(ico, png):
+    """The largest PNG-compressed image of a .ico file (Linux desktop entries show PNGs); False if it
+    has none."""
+    with open(ico, 'rb') as f:
+        d = f.read()
+    entries = []
+    for i in range(struct.unpack_from('<H', d, 4)[0]):
+        w, _, _, _, _, _, size, offset = struct.unpack_from('<BBBBHHII', d, 6 + 16 * i)
+        if d[offset:offset + 4] == b'\x89PNG':
+            entries.append((w or 256, offset, size))
+    if not entries:
+        return False
+    _, offset, size = max(entries)
+    with open(png, 'wb') as f:
+        f.write(d[offset:offset + size])
+    return True
 
 
 class Project:

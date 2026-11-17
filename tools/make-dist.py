@@ -23,7 +23,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gameproject import MODULE_SUFFIX, WINDOWS, Project  # noqa: E402
+from gameproject import MODULE_SUFFIX, WINDOWS, Project, ico_to_png  # noqa: E402
 
 
 def main():
@@ -64,9 +64,9 @@ def main():
     if a.redist:
         for f in glob.glob(os.path.join(a.redist, 'msvcp140*.dll')) + glob.glob(os.path.join(a.redist, 'vcruntime140*.dll')):
             shutil.copy2(f, out)
-    # Linux: the icon a desktop entry shows
-    if os.path.exists(os.path.join(bin_dir, p.id + '.png')):
-        shutil.copy2(os.path.join(bin_dir, p.id + '.png'), out)
+    # Linux: the icon a desktop entry shows, from the .ico the build puts beside the executable
+    if not WINDOWS and os.path.exists(os.path.join(bin_dir, p.id + '.ico')):
+        ico_to_png(os.path.join(bin_dir, p.id + '.ico'), os.path.join(out, p.id + '.png'))
     # static assets Vita3K reads next to the executable
     for d in ('data', 'shaders-builtin', 'icons'):
         if os.path.isdir(os.path.join(bin_dir, d)):

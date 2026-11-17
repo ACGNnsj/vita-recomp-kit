@@ -54,7 +54,7 @@ VC_RUNTIME = re.compile(r'(?i)^(msvcp140.*|vcruntime140.*|concrt140)\.dll$')
 
 # Linux: Python from python-build-standalone (with Tk), the same wheels as manylinux builds
 PBS_REPO = 'astral-sh/python-build-standalone'
-LINUX_BIN_FILES = re.compile(r'^(\w[\w-]*\.x86_64|\w[\w-]*\.png|COPYING\.txt)$')
+LINUX_BIN_FILES = re.compile(r'^(\w[\w-]*\.x86_64|\w[\w-]*\.ico|COPYING\.txt)$')
 LINUX_SYSTEM_LIBS = {'libc.so.6', 'libm.so.6', 'libdl.so.2', 'libpthread.so.0', 'librt.so.1',
                      'ld-linux-x86-64.so.2', 'libz.so.1'}
 
