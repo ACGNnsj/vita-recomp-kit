@@ -5,6 +5,8 @@ game.json:
     "id": "shinobido2",                       front end: <id>.exe, <id>.ini, <id>/
     "name": "Shinobido 2: Revenge of Zen",
     "title_id": "PCSE00015",
+    "other_title_ids": ["PCSB00123"],         the same game in other regions (optional): the
+                                              installed one is used; title_id names the game
     "eboot_sha256": {"<sha256>": "1.02"},     the eboot.bin builds the port supports
     "modules": {"eboot": "eboot", "libc": "libc", "sysmodule": "fw_sysmodule"},
                                               module as dumped -> generated/<name> (recompiled)
@@ -30,12 +32,20 @@ class Project:
         self.id = g['id']
         self.name = g['name']
         self.title_id = g['title_id']
+        self.title_ids = [self.title_id] + [t for t in g.get('other_title_ids', []) if t != self.title_id]
         self.eboot_sha256 = {k.lower(): v for k, v in g.get('eboot_sha256', {}).items()}
         self.modules = g.get('modules', {})
         self.load_bases = g.get('load_bases', {})
         self.dump_seconds = g.get('dump_seconds', 45)
         self.dist_readme = g.get('dist_readme')
         self.dist_files = g.get('dist_files', {})
+
+    def installed_title(self, fs):
+        """The title ID of the game installed in a Vita file system (ux0/app/<id>/eboot.bin), or None."""
+        for t in self.title_ids:
+            if os.path.exists(os.path.join(fs, 'ux0', 'app', t, 'eboot.bin')):
+                return t
+        return None
 
     def bin_dir(self, no_jit=False, config='RelWithDebInfo'):
         return os.path.join(self.root, 'build', 'vita3k-nojit' if no_jit else 'vita3k', 'bin', config)

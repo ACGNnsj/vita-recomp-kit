@@ -47,7 +47,7 @@ def ask(prompt, default=''):
 def ask_parts(game):
     """The dump's parts, asked one by one: the game, then its update and add-ons."""
     parts = []
-    print(f'\nWhere is your dump of {game["name"]} ({game["title_id"]})? A pkg, a folder, a zip or a vpk.')
+    print(f'\nWhere is your dump of {game["name"]} ({" or ".join([game["title_id"]] + game.get("other_title_ids", []))})? A pkg, a folder, a zip or a vpk.')
     labels = ['the game', 'its update (1.0x patch)', 'an add-on (DLC)']
     while True:
         label = labels[min(len([p for p in parts if p == '--install']), 2)]

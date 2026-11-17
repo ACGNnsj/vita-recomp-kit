@@ -96,21 +96,22 @@ def main():
         sys.exit(f'installation failed: see {os.path.join(bin_dir, p.id, "vita3k.log")}')
 
     # 2. a supported build
-    eboot = os.path.join(fs, 'ux0', 'app', p.title_id, 'eboot.bin')
-    if not os.path.exists(eboot):
-        sys.exit(f'no {p.title_id} in {fs} after installing')
+    title = p.installed_title(fs)
+    if not title:
+        sys.exit(f'no {" or ".join(p.title_ids)} in {fs} after installing')
+    eboot = os.path.join(fs, 'ux0', 'app', title, 'eboot.bin')
     with open(eboot, 'rb') as f:
         digest = hashlib.sha256(f.read()).hexdigest()
     if p.eboot_sha256 and digest not in p.eboot_sha256:
         supported = ', '.join(sorted(set(p.eboot_sha256.values())))
         sys.exit(f'eboot.bin is not a build this port supports ({supported}; SHA-256 {digest}): '
                  'install the game\'s update with it')
-    print('eboot.bin:', p.eboot_sha256.get(digest, digest))
+    print(f'eboot.bin ({title}):', p.eboot_sha256.get(digest, digest))
 
     recompiled_dir = os.path.join(work, 'build')
     if not a.no_recompile and p.modules:
         # 3. the modules' ELFs, written as the game loads them (on the JIT: nothing recompiled yet)
-        dumps = os.path.join(bin_dir, p.id, 'elfdumps', p.title_id)
+        dumps = os.path.join(bin_dir, p.id, 'elfdumps', title)
         for old in glob.glob(os.path.join(dumps, '*.elf')):
             os.remove(old)
         seconds = a.dump_seconds or p.dump_seconds

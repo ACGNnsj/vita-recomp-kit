@@ -99,7 +99,7 @@ class Window:
         f.columnconfigure(0, weight=1)
         ttk.Label(f, text=game['name'], font=('Segoe UI', 14, 'bold')).grid(sticky='w')
         ttk.Label(f, wraplength=720, justify='left', text=(
-            f'This turns your own dump of the game ({game["title_id"]}) into a playable PC port. It downloads '
+            f'This turns your own dump of the game ({" or ".join([game["title_id"]] + game.get("other_title_ids", []))}) into a playable PC port. It downloads '
             'the PS Vita firmware from Sony and a compiler, then translates the game\'s code and compiles it on '
             'this PC, which takes a few minutes. Nothing of the game leaves your PC.')).grid(sticky='w', pady=(4, 10))
 
