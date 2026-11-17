@@ -172,7 +172,13 @@ python3.12 -I tools/make-setup.py resolve-linux tools/setup-linux.json <tag>   #
 The Linux setup is a `.tar.gz`: `setup.sh`, python-build-standalone's
 CPython 3.12 (Tk included, for the same window) with the wheels, the kit
 and the front end (its debug information stripped). It downloads into
-`~/.cache/vita-recomps` and works as on Windows; `--shortcut` makes a
-desktop entry (applications menu and desktop), which Steam's "Add a
-Non-Steam Game" lists. Soul Sacrifice Delta on a Steam Deck: 20 min from
-the dump to the playable folder, 14 of them compiling (6 jobs).
+`~/.cache/vita-recomps` and works as on Windows. The playable folder gets
+`<id>.desktop`; `--shortcut` puts it in the applications menu and on the
+desktop too, and `--steam` (ticked by default in the window) adds the game
+to the running Steam client as a non-Steam game, the way SteamOS's "Add to
+Steam" does (`steam://addnonsteamgame/<the .desktop file>`, accepted while
+`/tmp/addnonsteamgamefile` exists): Steam takes its name, executable, start
+folder and icon, and on a Steam Deck the game starts from Game Mode.
+Without Steam running it says so; "Add a Non-Steam Game" then does the
+same. Soul Sacrifice Delta on a Steam Deck: 20 min from the dump to the
+playable folder, 14 of them compiling (6 jobs).

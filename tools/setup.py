@@ -7,7 +7,7 @@ uploaded or shared.
 usage (no arguments: a window asks, setupgui.py; --console: questions in the console):
   setup.bat|setup.sh [--console]
   setup.bat|setup.sh [--install <pkg|folder|zip|vpk> [--license <work.bin|rif> | --zrif Z]] ...
-            [--out DIR] [--cache DIR] [--accept-microsoft-license] [--jobs N] [--shortcut]
+            [--out DIR] [--cache DIR] [--accept-microsoft-license] [--jobs N] [--shortcut] [--steam]
 
   --install   repeat for each part, in order: the game, then its update, then add-ons
   --out       the playable folder (default: <game id> next to the setup)
@@ -16,11 +16,15 @@ usage (no arguments: a window asks, setupgui.py; --console: questions in the con
   --accept-microsoft-license   Windows only: the compiler's C++ runtime and SDK
   --shortcut  Windows: a shortcut on the desktop. Linux: an entry in the applications menu (which
               Steam's "Add a Non-Steam Game" lists) and on the desktop
+  --steam     Linux: add the game to Steam as a non-Steam game (Steam must be running), as SteamOS's
+              "Add to Steam" does; on a Steam Deck it then starts from Game Mode
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
+import urllib.parse
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS)
@@ -44,16 +48,18 @@ def desktop_shortcut(exe, name):
     return r.stdout.strip() if r.returncode == 0 else ''
 
 
-def desktop_entry(exe, game, out):
-    """Linux: <id>.desktop in the applications menu and on the desktop; the menu entry's path."""
+def desktop_entry(exe, game, out, menu):
+    """Linux: <id>.desktop in the playable folder, and with menu in the applications menu and on the
+    desktop too; the folder's file and the menu entry's path ('' when not made)."""
     icon = os.path.join(out, game['id'] + '.png')
     text = ('[Desktop Entry]\nType=Application\n'
             f'Name={game["name"]}\nExec="{exe}"\nPath={out}\nTerminal=false\nCategories=Game;\n'
             + (f'Icon={icon}\n' if os.path.exists(icon) else ''))
     home = os.path.expanduser('~')
     data = os.environ.get('XDG_DATA_HOME') or os.path.join(home, '.local', 'share')
+    folders = [out] + ([os.path.join(data, 'applications'), os.path.join(home, 'Desktop')] if menu else [])
     made = []
-    for folder in (os.path.join(data, 'applications'), os.path.join(home, 'Desktop')):
+    for folder in folders:
         if not os.path.isdir(os.path.dirname(folder)):
             continue
         os.makedirs(folder, exist_ok=True)
@@ -62,7 +68,26 @@ def desktop_entry(exe, game, out):
             f.write(text)
         os.chmod(path, 0o755)  # KDE starts a desktop file from the desktop only when it is executable
         made.append(path)
-    return made[0] if made else ''
+    return made[0], (made[1] if len(made) > 1 else '')
+
+
+def add_to_steam(desktop):
+    """Linux: hand a .desktop file to the running Steam client as a non-Steam game, as SteamOS's "Add
+    to Steam" (holo-add-to-steam) does. Steam takes steam://addnonsteamgame/<path> only while
+    /tmp/addnonsteamgamefile exists, so that a link elsewhere can't add games. Returns what happened."""
+    steam = shutil.which('steam')
+    running = subprocess.run(['pgrep', '-x', 'steam'], capture_output=True).returncode == 0
+    if not steam or not running:
+        return (f'Steam is not running: start it, then add {desktop} with "Add a Non-Steam Game" '
+                '(or run the setup again with --steam)')
+    open('/tmp/addnonsteamgamefile', 'a').close()
+    url = 'steam://addnonsteamgame/' + urllib.parse.quote(desktop, safe='')
+    try:
+        # the steam script passes the link to the running client and returns
+        subprocess.run([steam, url], capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        pass
+    return f'added to Steam as a non-Steam game ({desktop})'
 
 
 def default_cache():
@@ -128,7 +153,7 @@ def main():
         if rest[j] in ('--out', '--cache', '--jobs') and j + 1 < len(rest):
             opts[rest[j]] = rest[j + 1]
             j += 2
-        elif rest[j] in ('--accept-microsoft-license', '--shortcut'):
+        elif rest[j] in ('--accept-microsoft-license', '--shortcut', '--steam'):
             opts[rest[j]] = True
             j += 1
         else:
@@ -175,9 +200,12 @@ def main():
     if opts.get('--shortcut') and WINDOWS:
         lnk = desktop_shortcut(exe, game['name'])
         print(f'desktop shortcut: {lnk}' if lnk else 'the desktop shortcut could not be made')
-    elif opts.get('--shortcut'):
-        entry = desktop_entry(exe, game, out)
-        print(f'applications menu entry: {entry}' if entry else 'the menu entry could not be made')
+    elif not WINDOWS:
+        desktop, entry = desktop_entry(exe, game, out, bool(opts.get('--shortcut')))
+        if opts.get('--shortcut'):
+            print(f'applications menu entry: {entry}' if entry else 'the menu entry could not be made')
+        if opts.get('--steam'):
+            print(add_to_steam(desktop))
     print(f'\n3/3 done: the game is in {out}. Start {exe}')
 
 

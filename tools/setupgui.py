@@ -97,6 +97,7 @@ class Window:
         self.out = tk.StringVar(value=default_out)
         self.accepted = tk.BooleanVar(value=licence_url is None)
         self.shortcut = tk.BooleanVar(value=True)
+        self.steam = tk.BooleanVar(value=True)  # Linux: setup.py --steam
         self.stage = tk.StringVar(value='')
         self.extra_args = []  # more setup.py arguments (tests: --cache)
 
@@ -143,6 +144,9 @@ class Window:
                     'Add the game to the applications menu and the desktop (Steam\'s "Add a Non-Steam Game" '
                     'lists it)')
         ttk.Checkbutton(f, variable=self.shortcut, text=shortcut).grid(sticky='w', pady=(4, 0))
+        if not WINDOWS:
+            ttk.Checkbutton(f, variable=self.steam, text='Add the game to Steam (a non-Steam game: on a Steam Deck '
+                            'it then starts from Game Mode; Steam must be running)').grid(sticky='w')
 
         buttons = ttk.Frame(f)
         buttons.grid(sticky='ew', pady=(12, 0))
@@ -215,6 +219,8 @@ class Window:
             cmd.append('--accept-microsoft-license')
         if self.shortcut.get():
             cmd.append('--shortcut')
+        if not WINDOWS and self.steam.get():
+            cmd.append('--steam')
         self.install['state'] = 'disabled'
         self.bar['value'] = 0
         self.stage.set(STAGES[0][1])
