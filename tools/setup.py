@@ -11,7 +11,7 @@ usage (no parts: a window asks, setupgui.py; --console: questions in the console
 its own --dump parts on as --install:
   python -I setup/kit/tools/setup.py [--console]
   python -I setup/kit/tools/setup.py [--install <pkg|folder|zip|vpk> [--license <work.bin|rif> | --zrif Z]] ...
-            [--cache DIR] [--accept-microsoft-license] [--jobs N] [--shortcut] [--steam] [--exe FILE]
+            [--cache DIR] [--accept-microsoft-license] [--jobs N] [--shortcut] [--steam] [--progress] [--exe FILE]
   python -I setup/kit/tools/setup.py --add-to-steam
 
   --install   repeat for each part, in order: the game, then its update, then add-ons
@@ -24,6 +24,8 @@ its own --dump parts on as --install:
   --steam     Linux: add the game to Steam as a non-Steam game (Steam must be running), as SteamOS's
               "Add to Steam" does; on a Steam Deck it then starts from Game Mode
   --add-to-steam  only that (Linux), then exit
+  --progress  with --install: also lines "progress <0-1> <text>" for a launcher's progress bar
+              (RecompLauncher's setup step, recomplauncher.json "prepare")
   --exe       the game's executable (default: the one in the game's folder; macOS: inside its app)
 
 Exit codes: 0 built (the game then starts), 2 built but the window was closed without Play, 1 failed
@@ -326,7 +328,7 @@ def main():
         if rest[j] in ('--cache', '--jobs', '--exe') and j + 1 < len(rest):
             opts[rest[j]] = rest[j + 1]
             j += 2
-        elif rest[j] in ('--accept-microsoft-license', '--shortcut', '--steam', '--add-to-steam', '--console'):
+        elif rest[j] in ('--accept-microsoft-license', '--shortcut', '--steam', '--add-to-steam', '--console', '--progress'):
             opts[rest[j]] = True
             j += 1
         else:
@@ -343,6 +345,11 @@ def main():
         import setupgui
         sys.exit(setupgui.Window(game, os.path.abspath(__file__), OUT, exe, lock.get('microsoft_license')).run())
     interactive = not parts
+
+    def step(fraction, text):
+        """--progress: a launcher's progress line, the fraction of the whole setup done."""
+        if opts.get('--progress'):
+            print(f'progress {fraction:.2f} {text}', flush=True)
 
     print(f'{game["name"]}: setup')
     if interactive:
@@ -364,6 +371,7 @@ def main():
 
     print(f'\n1/3 firmware (from Sony) and compiler ({lock["download_bytes"] / 2**20:,.0f} MB), into {cache}')
     py = [sys.executable, '-I', '-u']
+    step(0.02, 'Downloading the PS Vita firmware from Sony')
     if subprocess.run(py + [os.path.join(TOOLS, 'fetch-firmware.py'), os.path.join(cache, 'firmware')]).returncode:
         sys.exit('downloading the firmware failed')
     tc_dir = os.path.join(cache, 'toolchain' if WINDOWS else f'toolchain-{platform}')
@@ -373,19 +381,40 @@ def main():
         with open(os.path.join(tc_dir, 'toolchain.json'), encoding='utf-8') as f:
             have = json.load(f)
     if any(have.get(k) != lock[k] for k in pinned):
+        step(0.10, 'Downloading the compiler')
         toolchain.fetch(lock_path, tc_dir, True)
 
     print(f'\n2/3 installing the game, recompiling and compiling its code in {out} (several minutes)')
     firmware = [os.path.join(cache, 'firmware', 'PSVUPDAT.PUP'), os.path.join(cache, 'firmware', 'PSP2UPDAT.PUP')]
-    r = subprocess.run(py + [os.path.join(TOOLS, 'install-game.py'), '--project', GAME, '--bin', out,
-                             '--exe', exe, '--work', work, '--toolchain', tc_dir, '--out', out, '--jobs', jobs,
-                             '--firmware', *firmware] + parts)
+    install = py + [os.path.join(TOOLS, 'install-game.py'), '--project', GAME, '--bin', out,
+                    '--exe', exe, '--work', work, '--toolchain', tc_dir, '--out', out, '--jobs', jobs,
+                    '--firmware', *firmware] + parts
+    if opts.get('--progress'):
+        # install-game.py's output passed on as it is, with a progress line at each of its steps
+        steps = [('installing', 0.30, 'Installing the game'),
+                 ('running the game', 0.40, 'Running the game once to read its code'),
+                 ('recompiling', 0.50, 'Recompiling the game\'s code'),
+                 ('compiling', 0.60, 'Compiling the game\'s code (this takes a while)')]
+        proc = subprocess.Popen(install, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        for raw in proc.stdout:
+            sys.stdout.buffer.write(raw)
+            sys.stdout.buffer.flush()
+            line = raw.decode('utf-8', 'replace')
+            for i, (prefix, fraction, text) in enumerate(steps):
+                if line.startswith(prefix):
+                    step(fraction, text)
+                    steps = steps[i + 1:]
+                    break
+        r = subprocess.CompletedProcess(install, proc.wait())
+    else:
+        r = subprocess.run(install)
     if r.returncode:
         # the work files stay, for a look at what went wrong; the next build replaces them
         sys.exit(f'the setup failed (see above; its work files are in {work})')
 
     # nothing of the build is left outside what the game needs: the work files (generated code), the
     # modules as the game loaded them, and the downloads (unless --cache keeps them)
+    step(0.95, 'Cleaning up')
     remove(work)
     remove(os.path.join(out, game['id'], 'elfdumps'))
     if not opts.get('--cache'):
@@ -404,6 +433,7 @@ def main():
         if opts.get('--steam'):
             print(add_to_steam(desktop))
     print(f'\n3/3 done: the game is built in {out}')
+    step(1.0, 'Done')
 
 
 if __name__ == '__main__':
