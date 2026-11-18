@@ -13,6 +13,7 @@ import tkinter as tk
 import webbrowser
 from tkinter import filedialog, messagebox, ttk
 
+import dumpinfo
 from gameproject import EXE_SUFFIX, MACOS, WINDOWS
 
 # a console of its own that no one sees, which every program the setup starts shares (Windows)
@@ -39,20 +40,52 @@ def find_licence(path):
 
 
 class Part:
-    """One part of the dump: a path and, for a pkg, its licence."""
+    """One part of the dump: a path and, for a pkg (or a dump without one inside), its licence. The
+    licence row shows only when it is needed; the whole part can stand aside as included in another
+    part's dump (the update in the game's zip)."""
 
     def __init__(self, parent, row, label, required):
         self.path = tk.StringVar()
         self.licence = tk.StringVar()
         self.required = required
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', padx=(0, 8), pady=2)
-        ttk.Entry(parent, textvariable=self.path, width=60).grid(row=row, column=1, sticky='ew', pady=2)
-        ttk.Button(parent, text='File...', command=self.pick_file).grid(row=row, column=2, padx=2)
-        ttk.Button(parent, text='Folder...', command=self.pick_folder).grid(row=row, column=3, padx=2)
-        ttk.Label(parent, text='Licence').grid(row=row + 1, column=0, sticky='w', padx=(0, 8))
-        ttk.Entry(parent, textvariable=self.licence, width=60).grid(row=row + 1, column=1, sticky='ew', pady=(0, 6))
-        ttk.Button(parent, text='Browse...', command=self.pick_licence).grid(row=row + 1, column=2, padx=2,
-                                                                            pady=(0, 6))
+        self.included = False
+        self.needs_licence = None  # the window's verdict for a zip or folder (dumpinfo); None: only a pkg
+        self.label = ttk.Label(parent, text=label)
+        self.label.grid(row=row, column=0, sticky='w', padx=(0, 8), pady=2)
+        self.entry = ttk.Entry(parent, textvariable=self.path, width=60)
+        self.entry.grid(row=row, column=1, sticky='ew', pady=2)
+        self.note = ttk.Label(parent, foreground='gray')
+        self.note.grid(row=row, column=1, sticky='w', pady=2)
+        self.note.grid_remove()
+        self.buttons = [ttk.Button(parent, text='File...', command=self.pick_file),
+                        ttk.Button(parent, text='Folder...', command=self.pick_folder)]
+        self.buttons[0].grid(row=row, column=2, padx=2)
+        self.buttons[1].grid(row=row, column=3, padx=2)
+        self.licence_row = [ttk.Label(parent, text='Licence'),
+                            ttk.Entry(parent, textvariable=self.licence, width=60),
+                            ttk.Button(parent, text='Browse...', command=self.pick_licence)]
+        self.licence_row[0].grid(row=row + 1, column=0, sticky='w', padx=(0, 8))
+        self.licence_row[1].grid(row=row + 1, column=1, sticky='ew', pady=(0, 6))
+        self.licence_row[2].grid(row=row + 1, column=2, padx=2, pady=(0, 6))
+        self.path.trace_add('write', lambda *_: self.show_licence())
+        self.show_licence()
+
+    def show_licence(self):
+        """The licence row: for a pkg, or a zip or folder found without its licence inside."""
+        path = self.path.get().strip().strip('"').lower()
+        show = not self.included and (path.endswith('.pkg') or bool(self.needs_licence))
+        self.licence_shown = show
+        for w in self.licence_row:
+            w.grid() if show else w.grid_remove()
+
+    def set_included(self, text):
+        """text: this part is in another part's dump (a note replaces the path); '' asks for it again."""
+        self.included = bool(text)
+        self.note['text'] = text
+        for w in [self.entry] + self.buttons:
+            w.grid_remove() if self.included else w.grid()
+        self.note.grid() if self.included else self.note.grid_remove()
+        self.show_licence()
 
     def pick_file(self):
         f = filedialog.askopenfilename(filetypes=[('Game dump', '*.pkg *.zip *.vpk'), ('All files', '*.*')])
@@ -74,11 +107,11 @@ class Part:
 
     def args(self):
         path = self.path.get().strip().strip('"')
-        if not path:
+        if not path or self.included:
             return []
         out = ['--install', path]
         lic = self.licence.get().strip().strip('"')
-        if lic:
+        if lic and self.licence_shown:
             out += ['--license', lic] if os.path.exists(lic) else ['--zrif', lic]
         return out
 
@@ -122,8 +155,11 @@ class Window:
         self.addon_row = 4
         self.add_button = ttk.Button(dump, text='Add an add-on (DLC)...', command=self.add_addon)
         self.add_button.grid(row=100, column=1, sticky='w', pady=(4, 0))
-        ttk.Label(dump, foreground='gray', text='The update and add-ons are optional. A licence can also be '
-                  'a zRIF typed in.').grid(row=101, column=1, sticky='w')
+        self.hint = 'The update and add-ons are optional. A licence can also be a zRIF typed in.'
+        self.dump_note = ttk.Label(dump, foreground='gray', text=self.hint, wraplength=560, justify='left')
+        self.dump_note.grid(row=101, column=1, sticky='w')
+        self.check_pending = None
+        self.parts[0].path.trace_add('write', self.watch_dump)
 
         where = ttk.Frame(f)
         where.grid(sticky='ew', pady=(10, 0))
@@ -172,6 +208,48 @@ class Window:
         sb.grid(row=0, column=1, sticky='ns')
         self.log['yscrollcommand'] = sb.set
         self.root.protocol('WM_DELETE_WINDOW', self.close)
+
+    def watch_dump(self, *_):
+        """The game's path changed (picked or typed): look into the dump once typing pauses."""
+        if self.check_pending:
+            self.root.after_cancel(self.check_pending)
+        self.check_pending = self.root.after(400, self.check_dump)
+
+    def check_dump(self):
+        """What the game's dump already holds (dumpinfo): its licence and the update aren't asked for
+        again. A pkg is encrypted: it keeps both rows."""
+        self.check_pending = None
+        game, update = self.parts
+        path = game.path.get().strip().strip('"')
+        found = None
+        if path and not path.lower().endswith('.pkg') and os.path.exists(path):
+            found = dumpinfo.inspect(path)
+        ids = [self.game['title_id']] + self.game.get('other_title_ids', [])
+        info = dumpinfo.summary(found, ids) if found is not None else None
+        game.needs_licence = bool(info and info['game'] and not info['game']['licence'])
+        game.show_licence()
+        need = dumpinfo.supported_version(self.game)
+        have = info['version'] if info else None
+        update.set_included(f'in the game\'s dump ({dumpinfo.label(have)})' if have and need and have >= need else '')
+        if not info:
+            self.dump_note['text'] = self.hint
+        elif not info['game'] and not info['update']:
+            self.dump_note['text'] = f'This dump holds no {" or ".join(ids)}.'
+        else:
+            held = []
+            if info['game']:
+                held.append(f'the game {dumpinfo.label(dumpinfo.version(info["game"]["version"]))}'
+                            + (' with its licence' if info['game']['licence'] else ', no licence inside'))
+            if info['update']:
+                held.append(f'the update {dumpinfo.label(dumpinfo.version(info["update"]["version"]))}')
+            if info['add-ons']:
+                held.append(f'{info["add-ons"]} add-on{"s" if info["add-ons"] > 1 else ""}')
+            text = 'Found in this dump: ' + ', '.join(held) + '.'
+            if need and (not have or have < need):
+                text += f' The port needs version {dumpinfo.label(need)}: add the update.'
+            if game.needs_licence:
+                text += ' Add the game\'s licence (work.bin, .rif or zRIF).'
+            self.dump_note['text'] = text
 
     def add_addon(self):
         part = Part(self.addon_frame, self.addon_row, f'Add-on {len(self.addons) + 1}', False)

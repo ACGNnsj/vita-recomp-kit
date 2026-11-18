@@ -31,6 +31,7 @@ import urllib.parse
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS)
+import dumpinfo  # noqa: E402
 import toolchain  # noqa: E402
 from gameproject import EXE_SUFFIX, MACOS, WINDOWS  # noqa: E402
 
@@ -246,8 +247,9 @@ def ask_parts(game):
     parts = []
     print(f'\nWhere is your dump of {game["name"]} ({" or ".join([game["title_id"]] + game.get("other_title_ids", []))})? A pkg, a folder, a zip or a vpk.')
     labels = ['the game', 'its update (1.0x patch)', 'an add-on (DLC)']
+    step = 0  # the next part asked for: 0 the game, 1 its update, 2 add-ons
     while True:
-        label = labels[min(len([p for p in parts if p == '--install']), 2)]
+        label = labels[step]
         path = ask(f'Path to {label}' + (' (empty: none)' if parts else ''))
         if not path:
             if parts:
@@ -257,6 +259,21 @@ def ask_parts(game):
             print(f'  {path} does not exist')
             continue
         parts += ['--install', os.path.abspath(path)]
+        licence_inside = False
+        if step == 0 and not path.lower().endswith('.pkg'):
+            # a zip or folder may hold the update and the licence too (NoNpDrm dumps): not asked again
+            found = dumpinfo.inspect(path)
+            info = dumpinfo.summary(found, [game['title_id']] + game.get('other_title_ids', [])) if found else None
+            need, have = dumpinfo.supported_version(game), info['version'] if info else None
+            licence_inside = bool(info and info['game'] and info['game']['licence'])
+            if have and need and have >= need:
+                print(f'  the update is in this dump ({dumpinfo.label(have)})')
+                step = 1
+            if info and info['game'] and not licence_inside:
+                lic = ask('  no licence inside it: work.bin or .rif path, or a zRIF (empty: none)')
+                if lic:
+                    parts += (['--license', os.path.abspath(lic)] if os.path.exists(lic) else ['--zrif', lic])
+        step = min(step + 1, 2)
         if path.lower().endswith('.pkg'):
             lic = ask('  its licence: work.bin or .rif path, or a zRIF (empty: covered by the game\'s)')
             if lic:
