@@ -319,14 +319,16 @@ def missing_macos_libs(path):
 
 
 def copy_game(p, bin_dir, game, files, exe):
-    """kit/game: the front end's files from bin_dir (those files matches, only this game's executable),
-    Vita3K's data, game.json and the playable folder's README."""
+    """kit/game: the front end's files from bin_dir (those files matches, only this game's executable
+    and icon: a build folder may hold several games), Vita3K's data, game.json and the playable folder's
+    README."""
     os.makedirs(game)
     if not os.path.exists(os.path.join(bin_dir, exe)):
         sys.exit(f'no {exe} in {bin_dir}')
-    suffix = os.path.splitext(exe)[1]
+    own = {os.path.splitext(exe)[1]: exe, '.ico': p.id + '.ico'}
     for f in os.listdir(bin_dir):
-        if os.path.isfile(os.path.join(bin_dir, f)) and files.match(f) and (not f.endswith(suffix) or f == exe):
+        ext = os.path.splitext(f)[1]
+        if os.path.isfile(os.path.join(bin_dir, f)) and files.match(f) and own.get(ext, f) == f:
             shutil.copy2(os.path.join(bin_dir, f), game)
     for d in BIN_DIRS:
         if os.path.isdir(os.path.join(bin_dir, d)):
