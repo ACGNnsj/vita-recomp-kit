@@ -8,7 +8,9 @@ usage:
 import hashlib
 import os
 import shutil
+import subprocess
 import sys
+import urllib.error
 import urllib.request
 
 FIRMWARE = [
@@ -39,8 +41,19 @@ def fetch(dest):
         if not (os.path.exists(path) and os.path.getsize(path) == size and sha256(path) == digest):
             print(f'downloading {name} ({size / 2**20:.0f} MB) from Sony', flush=True)
             req = urllib.request.Request(url, headers={'User-Agent': 'vita-recomp-kit fetch-firmware.py'})
-            with urllib.request.urlopen(req, timeout=120) as r, open(path + '.part', 'wb') as f:
-                shutil.copyfileobj(r, f, 1 << 20)
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r, open(path + '.part', 'wb') as f:
+                    shutil.copyfileobj(r, f, 1 << 20)
+            except urllib.error.URLError as e:
+                # Windows: Python checks certificates against the local store only (Windows fetches a
+                # missing intermediate certificate on demand for its own programs): Windows' curl.exe
+                curl = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'curl.exe')
+                if not (sys.platform == 'win32' and 'CERTIFICATE_VERIFY_FAILED' in str(e) and os.path.exists(curl)):
+                    raise
+                # (no console flashing up over the setup's window)
+                if subprocess.run([curl, '-sSfL', '--retry', '3', '-A', 'vita-recomp-kit fetch-firmware.py',
+                                   '-o', path + '.part', url], creationflags=subprocess.CREATE_NO_WINDOW).returncode:
+                    raise
             if sha256(path + '.part') != digest:
                 os.remove(path + '.part')
                 sys.exit(f'{name}: wrong SHA-256 (the download was damaged or Sony changed the file)')

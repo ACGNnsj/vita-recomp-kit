@@ -1,32 +1,35 @@
-"""Assemble a game's setup for players: a folder (and zip) that turns the player's own dump into a
-playable port without Git, Visual Studio or a Python install (docs D9 of the game projects). It holds:
+"""Assemble a game's release for players: the game's own folder (and an archive of it), which builds
+the game from the player's own dump the first time it starts, without Git, Visual Studio or a
+Python install (docs D9, D22 of the game projects). One program per platform, everything in the
+folder:
 
-  setup.bat               runs python\\python.exe -I -u kit\\tools\\setup.py
-  README.txt              what the setup does, and where the game ends up
-  python\\                 Python's embeddable distribution with Tk (python.org's tcltk.msi, for the
-                          setup's window), capstone and PyYAML (versions pinned: the recompiler's
-                          output depends on capstone's)
-  kit\\recomp, kit\\tools   this kit's recompiler and tools
-  kit\\game\\              the game's front end (a VITA3K_GAMES_ONLY build), Vita3K's data, game.json
-                          and the README of the playable folder: the template the setup installs
-                          from, kept out of sight so no one starts its exe
+  <id>.exe | <id>.x86_64 | <Name>.app   the game's front end (a VITA3K_GAMES_ONLY build): the one
+                          thing the player starts. Not built yet, it opens the importer (setup/)
+  (Windows) the DLLs it loads, the VC++ runtime among them (from the build machine's Visual Studio)
+  data/ shaders-builtin/ icons/ COPYING.txt   Vita3K's files the front end reads
+  README.txt              the game folder's README (game.json's dist_readme for the platform)
+  setup/python/           Python with Tk, capstone and PyYAML (versions pinned: the recompiler's
+                          output depends on capstone's): Windows, python.org's embeddable
+                          distribution and tcltk.msi; Linux and macOS, python-build-standalone
+  setup/kit/recomp, setup/kit/tools   this kit's recompiler and tools (tools/setup.py: the importer)
+  setup/kit/game/         game.json and the README's source
 
 Nothing derived from a game or the firmware goes in: release checks refuse such files.
 
-Linux (a setup-linux.json lock, run on Linux): setup.sh, python/ from python-build-standalone (Tk
-included) with the manylinux wheels, kit/ as above with <id>.x86_64; --zip makes a .tar.gz.
-
-macOS (a setup-macos.json lock, run on an Apple Silicon Mac): setup.command, python/ from
-python-build-standalone (Tk included) with the macOS arm64 wheels, kit/ as above with <id>.arm64 and
-libMoltenVK.dylib; --zip makes a .tar.gz. Nothing is signed with a developer ID: setup.command, the
-one file the player opens through Gatekeeper ("Open Anyway"), clears the download's quarantine from
-the rest of its folder.
+macOS: the app bundle runs the front end itself (Game Mode) and finds the folder as the one holding
+it; nothing is signed with a developer ID: the player lets the app through Gatekeeper once ("Open
+Anyway"), and the front end clears the download's quarantine from the rest of its folder.
 
 usage:
   python -I make-setup.py resolve <lock.json>           pin the embeddable Python and the wheels
   python -I make-setup.py resolve-linux <lock.json> <tag>   pin python-build-standalone release <tag>
   python -I make-setup.py resolve-macos <lock.json> <tag>   the same for Apple Silicon macOS
-  python -I make-setup.py build <lock.json> --project DIR --bin DIR --out DIR [--zip]
+  python -I make-setup.py build <lock.json> --project DIR --bin DIR --out DIR [--zip [--archive PATH]]
+
+  --out       the game's folder to make (its name is the archive's top folder)
+  --zip       also an archive of it (Windows .zip, Linux and macOS .tar.gz, which keep the
+              executables' modes and Python's symbolic links), at --archive (without extension;
+              default: --out)
 """
 import argparse
 import glob
@@ -44,7 +47,7 @@ import urllib.request
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gameproject import Project  # noqa: E402
+from gameproject import Project, ico_to_png  # noqa: E402
 
 KIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYTHON = '3.12.10'
@@ -52,17 +55,19 @@ WHEELS = {'capstone': '5.0.7', 'PyYAML': '6.0.3'}
 # what the front end's folder may hold; anything else (logs, dumps, saves, recompiled modules) stays out
 BIN_FILES = re.compile(r'^(\w[\w-]*\.exe|discord_game_sdk\.dll|lib(ssl|crypto)-\d+-x64\.dll|COPYING\.txt)$')
 BIN_DIRS = ('data', 'shaders-builtin', 'icons')
-# files a setup must never contain
+# files a release must never contain
 FORBIDDEN = re.compile(r'(?i)(\.(elf|self|suprx|pkg|pup|rif|vpk|bin|psarc|log)$|work\.bin|ssd_aot_|elfdumps|savedata)')
 
 
-# DLLs a game's folder need not carry: the VC++ runtime (the setup copies it from Microsoft's package)
-VC_RUNTIME = re.compile(r'(?i)^(msvcp140.*|vcruntime140.*|concrt140)\.dll$')
+# the VC++ runtime ss-delta.exe imports: shipped beside it from the build machine's Visual Studio
+# (D22: the exe must start before its importer has downloaded anything)
+VC_RUNTIME = re.compile(r'(?i)^(msvcp140.*|vcruntime140.*)\.dll$')
 
 # Linux: Python from python-build-standalone (with Tk), the same wheels as manylinux builds
 PBS_REPO = 'astral-sh/python-build-standalone'
 LINUX_BIN_FILES = re.compile(r'^(\w[\w-]*\.x86_64|\w[\w-]*\.ico|COPYING\.txt)$')
-MACOS_BIN_FILES = re.compile(r'^(\w[\w-]*\.arm64|\w[\w-]*\.ico|libMoltenVK\.dylib|COPYING\.txt)$')
+# macOS: the executable and MoltenVK go into the app bundle; these stay beside it
+MACOS_BIN_FILES = re.compile(r'^(COPYING\.txt)$')
 LINUX_SYSTEM_LIBS = {'libc.so.6', 'libm.so.6', 'libdl.so.2', 'libpthread.so.0', 'librt.so.1',
                      'ld-linux-x86-64.so.2', 'libz.so.1'}
 
@@ -97,12 +102,32 @@ def pe_imports(path):
 
 
 def missing_dlls(exe):
-    """Imported DLLs that are neither beside the exe, part of Windows, nor the VC++ runtime."""
+    """Imported DLLs that are neither beside the exe nor part of Windows (the VC++ runtime counts as
+    missing: a player's PC may lack it)."""
     system = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32')
     here = {f.lower() for f in os.listdir(os.path.dirname(exe))}
     return sorted(n for n in pe_imports(exe)
                   if n.lower() not in here and not n.lower().startswith(('api-ms-', 'ext-ms-'))
-                  and not VC_RUNTIME.match(n) and not os.path.exists(os.path.join(system, n)))
+                  and (VC_RUNTIME.match(n) or not os.path.exists(os.path.join(system, n))))
+
+
+def vc_runtime_dlls():
+    """The x64 VC++ runtime DLLs of this machine's newest Visual Studio (its Redist folder, which
+    Microsoft's licence lets a program carry)."""
+    vswhere = os.path.join(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'),
+                           'Microsoft Visual Studio', 'Installer', 'vswhere.exe')
+    r = subprocess.run([vswhere, '-latest', '-products', '*', '-requires',
+                        'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath'],
+                       capture_output=True, text=True)
+    root = r.stdout.strip().splitlines()[0] if r.returncode == 0 and r.stdout.strip() else ''
+    versions = [d for d in glob.glob(os.path.join(root, 'VC', 'Redist', 'MSVC', '*'))
+                if re.match(r'^\d+\.\d+\.\d+$', os.path.basename(d))] if root else []
+    for d in sorted(versions, key=lambda d: tuple(int(x) for x in os.path.basename(d).split('.')), reverse=True):
+        crt = glob.glob(os.path.join(d, 'x64', 'Microsoft.VC*.CRT'))
+        dlls = [f for f in glob.glob(os.path.join(crt[0], '*.dll')) if VC_RUNTIME.match(os.path.basename(f))] if crt else []
+        if dlls:
+            return dlls
+    sys.exit(f'no VC++ runtime (VC/Redist/MSVC/<version>/x64/Microsoft.VC*.CRT) in Visual Studio ({root or "not found"})')
 
 
 def elf_needed(path):
@@ -250,24 +275,67 @@ def release_check(out):
     """Refuse a setup holding anything that looks like game or firmware data."""
     bad = [os.path.relpath(os.path.join(d, f), out) for d, _, fs in os.walk(out) for f in fs
            if FORBIDDEN.search(os.path.relpath(os.path.join(d, f), out).replace('\\', '/'))
-           and not os.path.relpath(d, out).startswith('python')]
+           and not os.path.relpath(d, out).replace('\\', '/').startswith('setup/python')]
     if bad:
         shutil.rmtree(out)
         sys.exit('refused, files that look like game data: ' + ', '.join(bad[:10]))
 
 
-def copy_kit(out):
-    copy_tree(os.path.join(KIT, 'recomp'), os.path.join(out, 'kit', 'recomp'))
-    os.makedirs(os.path.join(out, 'kit', 'tools'))
+def copy_kit(out, p):
+    """setup/kit: this kit's recompiler and tools; setup/kit/game: game.json and the README's source."""
+    kit = os.path.join(out, 'setup', 'kit')
+    copy_tree(os.path.join(KIT, 'recomp'), os.path.join(kit, 'recomp'))
+    os.makedirs(os.path.join(kit, 'tools'))
     for f in glob.glob(os.path.join(KIT, 'tools', '*.py')) + glob.glob(os.path.join(KIT, 'tools', '*.json')):
-        shutil.copy2(f, os.path.join(out, 'kit', 'tools'))
-    shutil.copy2(os.path.join(KIT, 'LICENSE'), os.path.join(out, 'kit', 'LICENSE'))
+        shutil.copy2(f, os.path.join(kit, 'tools'))
+    shutil.copy2(os.path.join(KIT, 'LICENSE'), os.path.join(kit, 'LICENSE'))
+    game = os.path.join(kit, 'game')
+    os.makedirs(game)
+    shutil.copy2(os.path.join(p.root, 'game.json'), game)
+    if p.dist_readme:
+        os.makedirs(os.path.dirname(os.path.join(game, p.dist_readme)), exist_ok=True)
+        shutil.copy2(os.path.join(p.root, p.dist_readme), os.path.join(game, p.dist_readme))
+
+
+def downloads_dir(out):
+    """Where the release's own downloads (Python, wheels) are kept between builds: beside --out."""
+    return os.path.join(os.path.dirname(out), 'setup-downloads')
+
+
+def python_windows(lock, out):
+    """setup/python: Python's embeddable distribution with the wheels in Lib/site-packages, and Tk."""
+    paths = fetch(lock, downloads_dir(out))
+    py = os.path.join(out, 'setup', 'python')
+    with zipfile.ZipFile(paths['python'][0]) as z:
+        z.extractall(py)
+    site = os.path.join(py, 'Lib', 'site-packages')
+    for w in paths['wheel']:
+        with zipfile.ZipFile(w) as z:
+            z.extractall(site)
+    # its ._pth file is the whole sys.path
+    pth = glob.glob(os.path.join(py, 'python*._pth'))[0]
+    zipname = os.path.basename(pth)[:-5] + '.zip'
+    with open(pth, 'w', encoding='ascii', newline='\r\n') as f:
+        f.write(f'{zipname}\n.\nLib\nLib\\site-packages\n')
+    # Tk: an administrative install of the MSI (no elevation), then only what tkinter loads
+    with tempfile.TemporaryDirectory() as tmp:
+        r = subprocess.run(['msiexec.exe', '/a', paths['tcltk'][0], '/qn', f'TARGETDIR={tmp}\\tk'])
+        if r.returncode:
+            sys.exit(f'unpacking tcltk.msi failed ({r.returncode})')
+        tk = os.path.join(tmp, 'tk')
+        for f in os.listdir(os.path.join(tk, 'DLLs')):
+            shutil.copy2(os.path.join(tk, 'DLLs', f), py)
+        shutil.copytree(os.path.join(tk, 'Lib', 'tkinter'), os.path.join(py, 'Lib', 'tkinter'),
+                        ignore=shutil.ignore_patterns('test', '__pycache__'))
+        for d in ('tcl8', 'tcl8.6', 'tk8.6'):
+            shutil.copytree(os.path.join(tk, 'tcl', d), os.path.join(py, 'tcl', d),
+                            ignore=shutil.ignore_patterns('demos', 'images', 'tzdata'))
 
 
 def python_standalone(lock, out):
-    """python/ from python-build-standalone (Linux, macOS), with the wheels in its site-packages."""
-    paths = fetch(lock, os.path.join(os.path.dirname(out), 'setup-downloads'))
-    py = os.path.join(out, 'python')
+    """setup/python from python-build-standalone (Linux, macOS), with the wheels in its site-packages."""
+    paths = fetch(lock, downloads_dir(out))
+    py = os.path.join(out, 'setup', 'python')
     with tarfile.open(paths['python'][0]) as t:
         members = []
         for m in t.getmembers():
@@ -318,213 +386,127 @@ def missing_macos_libs(path):
                            and os.path.exists(os.path.join(here, n.split('/', 1)[1]))))
 
 
-def copy_game(p, bin_dir, game, files, exe):
-    """kit/game: the front end's files from bin_dir (those files matches, only this game's executable
-    and icon: a build folder may hold several games), Vita3K's data, game.json and the playable folder's
-    README."""
-    os.makedirs(game)
-    if not os.path.exists(os.path.join(bin_dir, exe)):
+def front_end(p, bin_dir, out, files, exe=None):
+    """The game's folder: the front end's files from bin_dir (those files matches; of the
+    executables, only exe), Vita3K's data, README.txt and the extra files game.json lists."""
+    if exe and not os.path.exists(os.path.join(bin_dir, exe)):
         sys.exit(f'no {exe} in {bin_dir}')
-    own = {os.path.splitext(exe)[1]: exe, '.ico': p.id + '.ico'}
+    suffix = os.path.splitext(exe)[1] if exe else None
     for f in os.listdir(bin_dir):
-        ext = os.path.splitext(f)[1]
-        if os.path.isfile(os.path.join(bin_dir, f)) and files.match(f) and own.get(ext, f) == f:
-            shutil.copy2(os.path.join(bin_dir, f), game)
+        # a build folder holds every game's executable and icon: only this game's
+        if os.path.isfile(os.path.join(bin_dir, f)) and files.match(f) and (not suffix or not f.endswith(suffix) or f == exe) \
+                and (not f.endswith('.ico') or f == p.id + '.ico'):
+            shutil.copy2(os.path.join(bin_dir, f), out)
     for d in BIN_DIRS:
         if os.path.isdir(os.path.join(bin_dir, d)):
-            shutil.copytree(os.path.join(bin_dir, d), os.path.join(game, d))
-    shutil.copy2(os.path.join(p.root, 'game.json'), game)
+            shutil.copytree(os.path.join(bin_dir, d), os.path.join(out, d))
+    windows = exe and exe.endswith('.exe')
     if p.dist_readme:
-        os.makedirs(os.path.dirname(os.path.join(game, p.dist_readme)), exist_ok=True)
-        shutil.copy2(os.path.join(p.root, p.dist_readme), os.path.join(game, p.dist_readme))
+        with open(os.path.join(p.root, p.dist_readme), encoding='utf-8') as f:
+            text = f.read()
+        with open(os.path.join(out, 'README.txt'), 'w', encoding='utf-8', newline='\r\n' if windows else '\n') as f:
+            f.write(text)
+    for fname, text in p.dist_files.items():
+        with open(os.path.join(out, fname), 'w', encoding='utf-8', newline='\r\n' if windows else '\n') as f:
+            f.write(text)
+        if not windows:
+            os.chmod(os.path.join(out, fname), 0o755)  # a launcher script
 
 
-def build_macos(a, lock, p, out):
-    """The macOS setup (Apple Silicon): python/ (python-build-standalone, Tk included), kit/,
-    setup.command; a .tar.gz, which keeps the executables' modes and Python's symbolic links."""
-    python_standalone(lock, out)
-    copy_kit(out)
-    game = os.path.join(out, 'kit', 'game')
-    exe = p.id + '.arm64'
-    copy_game(p, os.path.abspath(a.bin), game, MACOS_BIN_FILES, exe)
-    if not os.path.exists(os.path.join(game, 'libMoltenVK.dylib')):
-        shutil.rmtree(out)
-        sys.exit(f'refused, no libMoltenVK.dylib beside {exe} in {a.bin}')
-    # without the debug map (stripping drops the linker's ad-hoc signature, which Apple Silicon
-    # needs to run anything: sign it again, ad hoc)
-    subprocess.run(['strip', '-S', os.path.join(game, exe)], check=True)
-    subprocess.run(['codesign', '--force', '--sign', '-', os.path.join(game, exe)], check=True)
-
-    with open(os.path.join(out, 'README.txt'), 'w', encoding='utf-8', newline='\n') as f:
-        f.write(f'{p.name}: setup (macOS 13.3 or newer, Apple Silicon)\n\n'
-                'Double-click setup.command. macOS first refuses it, as it does anything downloaded that\n'
-                'isn\'t signed by a registered Apple developer: click Done, open System Settings > Privacy &\n'
-                'Security, scroll down to "setup.command was blocked" and click Open Anyway (once). Or, in\n'
-                'Terminal, run: sh <this folder>/setup.command\n\n'
-                'The setup asks for your own dump of the game, downloads the PS Vita firmware from Sony and a\n'
-                'compiler (zig, from ziglang.org), and builds the game into the folder you choose (by default\n'
-                f'"{p.id}" next to this setup\'s folder). Play from the app in that folder, or from\n'
-                'Applications if you let the setup put it there. Nothing in this folder is the game itself:\n'
-                'once the setup has finished, this folder can be deleted.\n')
-    launcher = os.path.join(out, 'setup.command')
-    with open(launcher, 'w', encoding='ascii', newline='\n') as f:
-        # A browser marks a download as quarantined, and unpacking passes the mark to every file:
-        # Gatekeeper would then stop Python and each library it loads. The player let this script
-        # through: it clears the mark from the rest of its folder. No arguments: the window; with
-        # arguments, the console setup
-        f.write('#!/bin/sh\nhere=$(cd "$(dirname "$0")" && pwd -P)\n'
-                'xattr -dr com.apple.quarantine "$here" 2>/dev/null\n'
-                'exec "$here/python/bin/python3" -I -u "$here/kit/tools/setup.py" "$@"\n')
-    os.chmod(launcher, 0o755)
-
-    missing = missing_macos_libs(os.path.join(game, exe))
-    if missing:
-        shutil.rmtree(out)
-        sys.exit(f'refused, {exe} needs libraries a player\'s Mac may lack: ' + ', '.join(missing))
+def finish(a, out, fmt):
+    """The release checks, its size, and with --zip its archive (fmt: 'zip' or 'gztar')."""
     release_check(out)
-
     size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(out) for f in fs)
     print(f'{out}: {size / 2**20:,.0f} MB')
     if a.zip:
-        archive = shutil.make_archive(out, 'gztar', os.path.dirname(out), os.path.basename(out))
+        base = os.path.abspath(a.archive) if a.archive else out
+        archive = shutil.make_archive(base, fmt, os.path.dirname(out), os.path.basename(out))
         print(f'{archive}: {os.path.getsize(archive) / 2**20:,.0f} MB, SHA-256 {sha256(archive)}')
+
+
+def build_windows(a, lock, p, out):
+    """Windows: <id>.exe with its DLLs and the VC++ runtime, setup/python (embeddable, Tk); a .zip."""
+    bin_dir = os.path.abspath(a.bin)
+    exe = p.id + '.exe'
+    front_end(p, bin_dir, out, BIN_FILES, exe)
+    for f in vc_runtime_dlls():
+        shutil.copy2(f, out)
+    # release check: the executable finds every DLL it imports on a player's PC, before anything
+    # is downloaded
+    missing = missing_dlls(os.path.join(out, exe))
+    if missing:
+        shutil.rmtree(out)
+        sys.exit(f'refused, {exe} imports DLLs the release does not carry: ' + ', '.join(missing))
+    python_windows(lock, out)
+    copy_kit(out, p)
+    finish(a, out, 'zip')
 
 
 def build_linux(a, lock, p, out):
-    """The Linux setup: python/ (python-build-standalone, Tk included), kit/, setup.sh; a .tar.gz,
-    which keeps the executables' modes."""
-    python_standalone(lock, out)
-    copy_kit(out)
-
-    game = os.path.join(out, 'kit', 'game')
+    """Linux: <id>.x86_64 and the icon a desktop entry shows, setup/python (python-build-standalone);
+    a .tar.gz."""
+    bin_dir = os.path.abspath(a.bin)
     exe = p.id + '.x86_64'
-    copy_game(p, os.path.abspath(a.bin), game, LINUX_BIN_FILES, exe)
+    front_end(p, bin_dir, out, LINUX_BIN_FILES, exe)
     # without its debug information (most of a RelWithDebInfo build's size)
     objcopy = shutil.which('objcopy')
     if objcopy:
-        subprocess.run([objcopy, '--strip-debug', os.path.join(game, exe)], check=True)
+        subprocess.run([objcopy, '--strip-debug', os.path.join(out, exe)], check=True)
     else:
         print(f'warning: no objcopy: {exe} keeps its debug information')
-
-    with open(os.path.join(out, 'README.txt'), 'w', encoding='utf-8', newline='\n') as f:
-        f.write(f'{p.name}: setup (Linux, x86-64; Steam Deck in desktop mode)\n\n'
-                'Run setup.sh (from a file manager, or ./setup.sh in a terminal). It asks for your own dump of\n'
-                'the game, downloads the PS Vita firmware from Sony and a compiler (zig, from ziglang.org),\n'
-                'and builds the game into the folder you choose (by default\n'
-                f'"{p.id}" next to this setup\'s folder). Play from that folder, or from the applications menu\n'
-                'entry the setup can make; on a Steam Deck, add that entry to Steam with "Add a Non-Steam\n'
-                'Game" to play in Game Mode. Nothing in this folder is the game itself: once the setup has\n'
-                'finished, this folder can be deleted.\n')
-    launcher = os.path.join(out, 'setup.sh')
-    with open(launcher, 'w', encoding='ascii', newline='\n') as f:
-        # no arguments: the window; otherwise the console setup
-        f.write('#!/bin/sh\nhere=$(dirname "$(readlink -f "$0")")\n'
-                'exec "$here/python/bin/python3" -I -u "$here/kit/tools/setup.py" "$@"\n')
-    os.chmod(launcher, 0o755)
-
-    missing = missing_libs(os.path.join(game, exe))
+    if os.path.exists(os.path.join(bin_dir, p.id + '.ico')):
+        ico_to_png(os.path.join(bin_dir, p.id + '.ico'), os.path.join(out, p.id + '.png'))
+    missing = missing_libs(os.path.join(out, exe))
     if missing:
         shutil.rmtree(out)
         sys.exit(f'refused, {exe} needs libraries a player\'s system may lack: ' + ', '.join(missing))
-    release_check(out)
+    python_standalone(lock, out)
+    copy_kit(out, p)
+    finish(a, out, 'gztar')
 
-    size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(out) for f in fs)
-    print(f'{out}: {size / 2**20:,.0f} MB')
-    if a.zip:
-        archive = shutil.make_archive(out, 'gztar', os.path.dirname(out), os.path.basename(out))
-        print(f'{archive}: {os.path.getsize(archive) / 2**20:,.0f} MB, SHA-256 {sha256(archive)}')
+
+def build_macos(a, lock, p, out):
+    """macOS (Apple Silicon): '<Name>.app', which runs <id>.arm64 itself with MoltenVK beside it,
+    setup/python (python-build-standalone); a .tar.gz."""
+    import setup as importer  # the app bundle, as the importer would make its copy in ~/Applications
+    bin_dir = os.path.abspath(a.bin)
+    exe = p.id + '.arm64'
+    for f in (exe, 'libMoltenVK.dylib'):
+        if not os.path.exists(os.path.join(bin_dir, f)):
+            shutil.rmtree(out)
+            sys.exit(f'refused, no {f} in {bin_dir}')
+    front_end(p, bin_dir, out, MACOS_BIN_FILES)
+    with open(os.path.join(p.root, 'game.json'), encoding='utf-8') as f:
+        game = json.load(f)
+    app = os.path.join(out, importer.app_name(game) + '.app')
+    with tempfile.TemporaryDirectory() as tmp:
+        shutil.copy2(os.path.join(bin_dir, exe), tmp)
+        shutil.copy2(os.path.join(bin_dir, 'libMoltenVK.dylib'), tmp)
+        # without the debug map (stripping drops the linker's ad-hoc signature; the bundle is signed
+        # again as a whole)
+        subprocess.run(['strip', '-S', os.path.join(tmp, exe)], check=True)
+        png = os.path.join(tmp, p.id + '.png')
+        if os.path.exists(os.path.join(bin_dir, p.id + '.ico')):
+            ico_to_png(os.path.join(bin_dir, p.id + '.ico'), png)
+        importer.mac_bundle(os.path.join(tmp, exe), game, app, png)
+    missing = missing_macos_libs(os.path.join(app, 'Contents', 'MacOS', game['id']))
+    if missing:
+        shutil.rmtree(out)
+        sys.exit(f'refused, {exe} needs libraries a player\'s Mac may lack: ' + ', '.join(missing))
+    python_standalone(lock, out)
+    copy_kit(out, p)
+    finish(a, out, 'gztar')
 
 
 def build(a):
     lock = json.load(open(a.lock, encoding='utf-8'))
     p = Project(a.project)
-    if lock.get('platform') in ('linux', 'macos'):
-        out = os.path.abspath(a.out)
-        if os.path.exists(out):
-            shutil.rmtree(out)
-        os.makedirs(out)
-        return (build_macos if lock['platform'] == 'macos' else build_linux)(a, lock, p, out)
     out = os.path.abspath(a.out)
     if os.path.exists(out):
         shutil.rmtree(out)
     os.makedirs(out)
-    paths = fetch(lock, os.path.join(os.path.dirname(out), 'setup-downloads'))  # beside the setup
-
-    # Python, embeddable, with the wheels in Lib/site-packages; its ._pth file is the whole sys.path
-    py = os.path.join(out, 'python')
-    with zipfile.ZipFile(paths['python'][0]) as z:
-        z.extractall(py)
-    site = os.path.join(py, 'Lib', 'site-packages')
-    for w in paths['wheel']:
-        with zipfile.ZipFile(w) as z:
-            z.extractall(site)
-    pth = glob.glob(os.path.join(py, 'python*._pth'))[0]
-    zipname = os.path.basename(pth)[:-5] + '.zip'
-    with open(pth, 'w', encoding='ascii', newline='\r\n') as f:
-        f.write(f'{zipname}\n.\nLib\nLib\\site-packages\n')
-    # Tk: an administrative install of the MSI (no elevation), then only what tkinter loads
-    with tempfile.TemporaryDirectory() as tmp:
-        r = subprocess.run(['msiexec.exe', '/a', paths['tcltk'][0], '/qn', f'TARGETDIR={tmp}\\tk'])
-        if r.returncode:
-            sys.exit(f'unpacking tcltk.msi failed ({r.returncode})')
-        tk = os.path.join(tmp, 'tk')
-        for f in os.listdir(os.path.join(tk, 'DLLs')):
-            shutil.copy2(os.path.join(tk, 'DLLs', f), py)
-        shutil.copytree(os.path.join(tk, 'Lib', 'tkinter'), os.path.join(py, 'Lib', 'tkinter'),
-                        ignore=shutil.ignore_patterns('test', '__pycache__'))
-        for d in ('tcl8', 'tcl8.6', 'tk8.6'):
-            shutil.copytree(os.path.join(tk, 'tcl', d), os.path.join(py, 'tcl', d),
-                            ignore=shutil.ignore_patterns('demos', 'images', 'tzdata'))
-
-    # the kit: recompiler and tools
-    copy_kit(out)
-
-    # the game's front end and its description
-    game = os.path.join(out, 'kit', 'game')
-    os.makedirs(game)
-    bin_dir = os.path.abspath(a.bin)
-    if not os.path.exists(os.path.join(bin_dir, p.id + '.exe')):
-        sys.exit(f'no {p.id}.exe in {bin_dir}')
-    for f in os.listdir(bin_dir):
-        if os.path.isfile(os.path.join(bin_dir, f)) and BIN_FILES.match(f) \
-                and (not f.endswith('.exe') or f == p.id + '.exe'):
-            shutil.copy2(os.path.join(bin_dir, f), game)
-    for d in BIN_DIRS:
-        if os.path.isdir(os.path.join(bin_dir, d)):
-            shutil.copytree(os.path.join(bin_dir, d), os.path.join(game, d))
-    shutil.copy2(os.path.join(p.root, 'game.json'), game)
-    if p.dist_readme:
-        os.makedirs(os.path.dirname(os.path.join(game, p.dist_readme)), exist_ok=True)
-        shutil.copy2(os.path.join(p.root, p.dist_readme), os.path.join(game, p.dist_readme))
-
-    with open(os.path.join(out, 'README.txt'), 'w', encoding='utf-8', newline='\r\n') as f:
-        f.write(f'{p.name}: setup\n\n'
-                'Run setup.bat. It asks for your own dump of the game, downloads the PS Vita firmware from\n'
-                'Sony and a compiler, and builds the game into the folder you choose (by default\n'
-                f'"{p.id}" next to this setup\'s folder). Play from that folder, or from the desktop\n'
-                'shortcut the setup can make. Nothing in this folder is the game itself: once the setup\n'
-                'has finished, this folder can be deleted.\n')
-
-    with open(os.path.join(out, 'setup.bat'), 'w', encoding='ascii', newline='\r\n') as f:
-        # no arguments: the window, without a console; otherwise the console setup
-        f.write('@echo off\nif "%~1"=="" (\n  start "" "%~dp0python\\pythonw.exe" -I "%~dp0kit\\tools\\setup.py"\n'
-                '  exit /b 0\n)\n"%~dp0python\\python.exe" -I -u "%~dp0kit\\tools\\setup.py" %*\n'
-                'set rc=%errorlevel%\nif "%~1"=="--console" pause\nexit /b %rc%\n')
-
-    # release check: the executable finds every DLL it imports on a player's PC
-    missing = missing_dlls(os.path.join(game, p.id + '.exe'))
-    if missing:
-        shutil.rmtree(out)
-        sys.exit(f'refused, {p.id}.exe imports DLLs the setup does not carry: ' + ', '.join(missing))
-
-    # release check: nothing that looks like game or firmware data
-    release_check(out)
-
-    size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(out) for f in fs)
-    print(f'{out}: {size / 2**20:,.0f} MB')
-    if a.zip:
-        archive = shutil.make_archive(out, 'zip', os.path.dirname(out), os.path.basename(out))
-        print(f'{archive}: {os.path.getsize(archive) / 2**20:,.0f} MB, SHA-256 {sha256(archive)}')
+    platform = lock.get('platform', 'windows')
+    return {'windows': build_windows, 'linux': build_linux, 'macos': build_macos}[platform](a, lock, p, out)
 
 
 def main():
@@ -542,6 +524,7 @@ def main():
     ap.add_argument('--bin', required=True)
     ap.add_argument('--out', required=True)
     ap.add_argument('--zip', action='store_true')
+    ap.add_argument('--archive', default='')
     build(ap.parse_args())
 
 

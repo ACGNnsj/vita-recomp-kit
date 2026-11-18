@@ -39,7 +39,7 @@ directories and passes their paths in.
 | `tools/toolchain.py`, `tools/toolchain-windows.json`, `tools/toolchain-linux.json`, `tools/toolchain-macos.json` | a compiler for the modules that needs no Visual Studio: llvm-mingw's clang-cl and lld-link with Microsoft's C++ runtime and Windows SDK downloaded from Microsoft's Visual Studio manifest, every file pinned by SHA-256 in the lock file; also the VC++ runtime DLLs a playable folder carries. Linux and macOS: zig |
 | `tools/install-game.py`, `tools/make-dist.py` | from the player's dump (firmware, game, patch, add-ons; pkgs with their licence) to a playable folder `dist/<name>/`, as the game's `game.json` describes it (`gameproject.py`); `--bin`, `--toolchain`, `--out` for a prebuilt front end, the downloaded toolchain and any folder |
 | `tools/fetch-firmware.py` | the PS Vita firmware Vita3K needs (3.74 and the font package) from Sony's update servers, checked by SHA-256 |
-| `tools/make-setup.py`, `tools/setup-windows.json`, `tools/setup-linux.json`, `tools/setup-macos.json`, `tools/setup.py` | a game's setup for players: Python (Windows: the embeddable distribution; Linux and macOS: python-build-standalone) with capstone and PyYAML (pinned), the kit, the game's front end; `setup.py` runs on the player's computer (see below) |
+| `tools/make-setup.py`, `tools/setup-windows.json`, `tools/setup-linux.json`, `tools/setup-macos.json`, `tools/setup.py`, `tools/setupgui.py`, `tools/dumpinfo.py` | a game's release for players: the game's own folder with its front end and, in `setup/`, the importer: Python (Windows: the embeddable distribution; Linux and macOS: python-build-standalone) with capstone and PyYAML (pinned) and the kit; `setup.py` runs on the player's computer, started by the game (see below) |
 
 ## Tools
 
@@ -106,44 +106,50 @@ CMake or Ninja. Soul Sacrifice Delta's ten modules build in 3 min with 6 jobs
 (MSVC: ~12 min); they load in the MSVC-built fork, and the differential check
 found no mismatch.
 
-## A setup for players
+## A release for players
 
 A player who has a dump of the game, but no Git, Visual Studio or Python,
-gets a playable folder from a setup. The setup holds Python's embeddable
-distribution, this kit and the game's front end, and no game or firmware
-data.
+gets the game's own folder: one program to start, which builds the game
+the first time. The release holds the game's front end, its files, and in
+`setup/` the importer: Python (with Tk), this kit and the game's
+`game.json`. It holds no game or firmware data.
 
 ```
 python -I tools/build-vita3k.py --project <game> --games-only     # -> <game>/build/vita3k-games
 python -I tools/make-setup.py build tools/setup-windows.json --project <game> ^
-       --bin <game>/build/vita3k-games/bin/RelWithDebInfo --out <dir>/<game>-setup --zip
+       --bin <game>/build/vita3k-games/bin/RelWithDebInfo --out <dir>/<id> --zip [--archive <path>]
 ```
 
-On the player's PC, `setup.bat` opens a window (`setupgui.py`, Tk from
-python.org's `tcltk.msi`). The window asks for:
-* the dump's parts: the game, its update and add-ons, with their licences;
-* the playable folder;
-* acceptance of Microsoft's licence.
+On Windows the folder carries the VC++ runtime DLLs beside `<id>.exe`, from
+the build machine's Visual Studio: the executable has to start before
+anything is downloaded.
 
-With arguments (taken as `install-game.py` takes them), or with
-`--console`, `setup.bat` runs in the console instead. Either way, it then:
+The front end (the fork's `game-frontend/importer.cpp`) starts the
+importer, `setup/kit/tools/setup.py`, when the game isn't built yet,
+or when asked (`--install`), and waits for it. With no parts given, the
+importer opens a window (`setupgui.py`). It asks for the dump's parts (the
+game, its update and add-ons, with their licences; `dumpinfo.py` finds
+what a dump already holds) and, on Windows, Microsoft's licence. The
+front end's `--dump <file>` instead passes the parts on for the console
+flow. Either way, the importer then:
 
 1. downloads the firmware from Sony (`fetch-firmware.py`) and the toolchain
-   (`toolchain.py`) into `%LOCALAPPDATA%\vita-recomps`, shared by every
-   game's setup;
+   (`toolchain.py`) into `setup/downloads` (`--cache <dir>`: elsewhere, kept);
 2. installs the game, runs it once (hidden and silent: the front end's
    `--dump-elfs`) to write the modules as loaded,
-   recompiles them and compiles them with the toolchain (`install-game.py
-   --bin --toolchain --out`);
-3. lays out the playable folder with the VC++ runtime DLLs beside the
-   executable (by default `<game id>` next to the setup's folder) and, if
-   asked, puts a shortcut to it on the desktop.
+   recompiles them and compiles them with the toolchain, in the game's own
+   folder (`install-game.py --bin <folder> --out <folder> --toolchain`;
+   `make-dist.py` leaves the running front end's files alone);
+3. deletes its downloads (unless `--cache`), its work files
+   (`setup/work`) and the modules as loaded; if asked, it adds a desktop
+   shortcut, a menu entry, a Steam entry or a copy in `~/Applications`.
 
-The game's front end sits in the setup's `kit\game\` as the template the
-playable folder is made from, out of sight. On its own it has no game
-installed, so it isn't meant to be started.
+The window's Play (or exit code 0) hands back to the front end, which boots
+the game in the same process. Everything stays in the game's folder: the
+front end takes every path from it (`--game <folder>`, else the
+executable's).
 
-`make-setup.py` refuses to write a setup that holds anything that looks
+`make-setup.py` refuses to write a release that holds anything that looks
 like game data (ELFs, pkgs, PUPs, licences, recompiled modules, saves,
 logs).
 
@@ -165,14 +171,14 @@ libc++ and glibc's link stubs, MIT and Apache licences, nothing to accept.
 ```
 python3.12 -I tools/build-vita3k.py --project <game> --target <id>   # -> <game>/build/vita3k-games
 python3.12 -I tools/make-setup.py build tools/setup-linux.json --project <game> \
-       --bin <game>/build/vita3k-games/bin/RelWithDebInfo --out <dir>/<game>-setup-linux --zip
+       --bin <game>/build/vita3k-games/bin/RelWithDebInfo --out <dir>/<id> --zip [--archive <path>]
 python3.12 -I tools/make-setup.py resolve-linux tools/setup-linux.json <tag>   # maintainers
 ```
 
-The Linux setup is a `.tar.gz`: `setup.sh`, python-build-standalone's
-CPython 3.12 (Tk included, for the same window) with the wheels, the kit
-and the front end (its debug information stripped). It downloads into
-`~/.cache/vita-recomps` and works as on Windows. The playable folder gets
+The Linux release is a `.tar.gz`: `<id>.x86_64` (its debug information
+stripped) and `<id>.png`, and in `setup/` python-build-standalone's
+CPython 3.12 (Tk included, for the same window) with the wheels and the
+kit. It works as on Windows. The game's folder gets
 `<id>.desktop`; `--shortcut` puts it in the applications menu and on the
 desktop too, and `--steam` (ticked by default in the window) adds the game
 to the running Steam client as a non-Steam game, the way SteamOS's "Add to
@@ -200,18 +206,21 @@ list, so hidden visibility leaves `armrecomp_aot_init` and libc++'s
 ```
 python3.12 -I tools/build-vita3k.py --project <game> --target <id>   # -> <game>/build/vita3k-games
 python3.12 -I tools/make-setup.py build tools/setup-macos.json --project <game> \
-       --bin <game>/build/vita3k-games/bin/RelWithDebInfo --out <dir>/<game>-setup-macos --zip
+       --bin <game>/build/vita3k-games/bin/RelWithDebInfo --out <dir>/<id> --zip [--archive <path>]
 python3.12 -I tools/make-setup.py resolve-macos tools/setup-macos.json <tag>   # maintainers
 ```
 
-The macOS setup is a `.tar.gz`: `setup.command`, python-build-standalone's
-CPython 3.12 for `aarch64-apple-darwin` (Tk included) with the wheels, the
-kit and the front end (debug map stripped, signed again ad hoc). Nothing
-is signed with a Developer ID. The player lets `setup.command` through
-once (System Settings, Privacy & Security, Open Anyway; or
-`sh setup.command`). It clears the download's quarantine from its folder,
-and everything else is built on the Mac. Downloads go to
-`~/Library/Caches/vita-recomps`. The playable folder gets `<name>.app`, a
-script that starts `<id>.arm64`, with the game's icon; `--shortcut` copies
-it to `~/Applications`. Soul Sacrifice Delta on an M5: 5.6 min from the
-dump to the playable folder, downloads included.
+The macOS release is a `.tar.gz`: `<name>.app`, which runs `<id>.arm64`
+itself (debug map stripped; `libMoltenVK.dylib` beside it in
+`Contents/MacOS`; the game's icon in a macOS icon's shape; the bundle
+signed ad hoc as a whole; `SDL_FILESYSTEM_BASE_DIR_TYPE = parent`, so the
+game's folder is the one holding the app; Game Mode in fullscreen), and in
+`setup/` python-build-standalone's CPython 3.12 for `aarch64-apple-darwin`
+(Tk included) with the wheels and the kit. Nothing is signed with a
+Developer ID: the player lets the app through once (System Settings,
+Privacy & Security, Open Anyway). Gatekeeper then runs it from a
+translocated copy; the front end clears the download's quarantine from its
+folder and starts again from there. `--shortcut` copies the app to
+`~/Applications`, pointed at the game's folder (`LSEnvironment`
+`VITA_RECOMPS_GAME_DIR`). Soul Sacrifice Delta on an M5: 5.6 min from the
+dump to the game, downloads included.

@@ -8,7 +8,10 @@ usage:
 
   --name            the folder's name (default <id>-<commit>)
   --out             the folder itself, anywhere (default dist/<name>)
-  --bin             the front end's folder, a prebuilt release (default the project's build)
+  --bin             the front end's folder, a prebuilt release (default the project's build); when it
+                    is --out itself (a release folder building in place), the front end's files are
+                    left as they are (Windows can't replace a running exe or its loaded DLLs)
+  --exe             the front end's executable when it isn't <bin>/<id><suffix> (a macOS app bundle)
   --redist          copy the VC++ runtime DLLs from DIR (toolchain.py's redist/) into the folder, so
                     the player needs no VC++ redistributable installed
   --vita-fs         set [paths] vita_fs in the ini (default: the fs folder next to the exe)
@@ -35,13 +38,14 @@ def main():
     ap.add_argument('--no-recompiled', action='store_true')
     ap.add_argument('--no-jit', action='store_true')
     ap.add_argument('--bin', default='')
+    ap.add_argument('--exe', default='')
     ap.add_argument('--out', default='')
     ap.add_argument('--redist', default='')
     a = ap.parse_args()
 
     p = Project(a.project)
-    exe = p.exe(a.no_jit, a.bin)
-    bin_dir = os.path.dirname(exe)
+    exe = os.path.abspath(a.exe) if a.exe else p.exe(a.no_jit, a.bin)
+    bin_dir = os.path.abspath(a.bin) if a.bin else os.path.dirname(exe)
     if a.out:
         out = os.path.abspath(a.out)
     else:
@@ -49,31 +53,39 @@ def main():
                                                       capture_output=True, text=True).stdout.strip()
         out = os.path.join(p.root, 'dist', name)
     os.makedirs(out, exist_ok=True)
+    # a release folder building in place: its front end, DLLs and static assets are already there
+    in_place = os.path.normcase(bin_dir) == os.path.normcase(out)
 
-    # the executable and the DLLs it loads (Windows and the VC++ runtime are the player's)
-    if os.path.normcase(bin_dir) == os.path.normcase(out):
-        sys.exit(f"--out is the front end's own folder ({out})")
-    shutil.copy2(exe, out)
-    dlls = ['discord_game_sdk.dll', 'libssl-4-x64.dll', 'libcrypto-4-x64.dll']
-    dlls += [os.path.basename(f) for f in glob.glob(os.path.join(bin_dir, 'av*.dll'))]
-    dlls += [os.path.basename(f) for f in glob.glob(os.path.join(bin_dir, 'sw*.dll'))]
-    # macOS: MoltenVK, Vulkan over Metal (the executable's rpath is its own folder)
-    dlls += ['libMoltenVK.dylib']
-    for d in dlls:
-        if os.path.exists(os.path.join(bin_dir, d)):
-            shutil.copy2(os.path.join(bin_dir, d), out)
-    # the VC++ runtime in the application's own folder (what the exe and the modules import)
+    # the executable and the DLLs it loads (Windows' own DLLs are the player's)
+    if not in_place:
+        shutil.copy2(exe, out)
+        dlls = ['discord_game_sdk.dll', 'libssl-4-x64.dll', 'libcrypto-4-x64.dll']
+        dlls += [os.path.basename(f) for f in glob.glob(os.path.join(bin_dir, 'av*.dll'))]
+        dlls += [os.path.basename(f) for f in glob.glob(os.path.join(bin_dir, 'sw*.dll'))]
+        # the VC++ runtime a release carries beside its exe
+        dlls += [os.path.basename(f) for f in glob.glob(os.path.join(bin_dir, 'msvcp140*.dll'))
+                 + glob.glob(os.path.join(bin_dir, 'vcruntime140*.dll'))]
+        # macOS: MoltenVK, Vulkan over Metal (the executable's rpath is its own folder)
+        dlls += ['libMoltenVK.dylib']
+        for d in dlls:
+            if os.path.exists(os.path.join(bin_dir, d)):
+                shutil.copy2(os.path.join(bin_dir, d), out)
+    # the VC++ runtime in the application's own folder (what the exe and the modules import); one
+    # already there (a release's, possibly loaded by the running front end) stays
     if a.redist:
         for f in glob.glob(os.path.join(a.redist, 'msvcp140*.dll')) + glob.glob(os.path.join(a.redist, 'vcruntime140*.dll')):
-            shutil.copy2(f, out)
+            if not os.path.exists(os.path.join(out, os.path.basename(f))):
+                shutil.copy2(f, out)
     # Linux: the icon a desktop entry shows, from the .ico the build puts beside the executable (macOS:
     # the setup's app bundle makes its icon from it)
-    if not WINDOWS and os.path.exists(os.path.join(bin_dir, p.id + '.ico')):
-        ico_to_png(os.path.join(bin_dir, p.id + '.ico'), os.path.join(out, p.id + '.png'))
+    png = os.path.join(out, p.id + '.png')
+    if not WINDOWS and os.path.exists(os.path.join(bin_dir, p.id + '.ico')) and not os.path.exists(png):
+        ico_to_png(os.path.join(bin_dir, p.id + '.ico'), png)
     # static assets Vita3K reads next to the executable
-    for d in ('data', 'shaders-builtin', 'icons'):
-        if os.path.isdir(os.path.join(bin_dir, d)):
-            shutil.copytree(os.path.join(bin_dir, d), os.path.join(out, d), dirs_exist_ok=True)
+    if not in_place:
+        for d in ('data', 'shaders-builtin', 'icons'):
+            if os.path.isdir(os.path.join(bin_dir, d)):
+                shutil.copytree(os.path.join(bin_dir, d), os.path.join(out, d), dirs_exist_ok=True)
 
     # the recompiled modules
     if not a.no_recompiled:
@@ -97,9 +109,11 @@ def main():
             with open(ini, 'w', encoding='utf-8') as f:
                 f.writelines(lines)
 
-    if p.dist_readme:
+    if p.dist_readme and not (in_place and os.path.exists(os.path.join(out, 'README.txt'))):
         shutil.copy2(os.path.join(p.root, p.dist_readme), os.path.join(out, 'README.txt'))
     for fname, text in p.dist_files.items():
+        if in_place and os.path.exists(os.path.join(out, fname)):
+            continue
         with open(os.path.join(out, fname), 'w', encoding='utf-8', newline='\r\n' if WINDOWS else '\n') as f:
             f.write(text)
         if not WINDOWS:

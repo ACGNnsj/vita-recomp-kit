@@ -1,24 +1,33 @@
-"""The player's setup (make-setup.py lays it out; setup.bat, setup.sh or setup.command runs it): from
-the player's own dump of the game to a playable folder. It downloads the PS Vita firmware from Sony
+"""The game's importer: from the player's own dump of the game to the game, built in its own folder.
+A release is that folder (make-setup.py lays it out): the game's executable (the one thing the
+player starts), its files, and this setup in setup/. The game starts the importer itself when it
+isn't installed yet, or when asked (--install). The importer downloads the PS Vita firmware from Sony
 and a compiler for the recompiled modules (Windows: from LLVM's and Microsoft's servers; Linux and
 macOS: zig, from ziglang.org), installs the game, recompiles its code and compiles it on this
-computer. Nothing of the game is ever uploaded or shared.
+computer, then deletes the downloads and its work files: everything stays in the game's folder.
+Nothing of the game is ever uploaded or shared.
 
-usage (no arguments: a window asks, setupgui.py; --console: questions in the console):
-  setup.bat|setup.sh|setup.command [--console]
-  setup.bat|setup.sh|setup.command [--install <pkg|folder|zip|vpk> [--license <work.bin|rif> | --zrif Z]] ...
-            [--out DIR] [--cache DIR] [--accept-microsoft-license] [--jobs N] [--shortcut] [--steam]
+usage (no parts: a window asks, setupgui.py; --console: questions in the console). The game passes
+its own --dump parts on as --install:
+  python -I setup/kit/tools/setup.py [--console]
+  python -I setup/kit/tools/setup.py [--install <pkg|folder|zip|vpk> [--license <work.bin|rif> | --zrif Z]] ...
+            [--cache DIR] [--accept-microsoft-license] [--jobs N] [--shortcut] [--steam] [--exe FILE]
+  python -I setup/kit/tools/setup.py --add-to-steam
 
   --install   repeat for each part, in order: the game, then its update, then add-ons
-  --out       the playable folder (default: <game id> next to the setup)
-  --cache     the downloads, shared by every game's setup (default %LOCALAPPDATA%\\vita-recomps; Linux:
-              ~/.cache/vita-recomps; macOS: ~/Library/Caches/vita-recomps)
+  --cache     keep the downloads in DIR, shared by every game's setup and kept for the next time
+              (default: inside setup/, deleted after a successful build)
   --accept-microsoft-license   Windows only: the compiler's C++ runtime and SDK
   --shortcut  Windows: a shortcut on the desktop. Linux: an entry in the applications menu (which
               Steam's "Add a Non-Steam Game" lists) and on the desktop. macOS: the game's app in
               ~/Applications too (Launchpad and Spotlight list it)
   --steam     Linux: add the game to Steam as a non-Steam game (Steam must be running), as SteamOS's
               "Add to Steam" does; on a Steam Deck it then starts from Game Mode
+  --add-to-steam  only that (Linux), then exit
+  --exe       the game's executable (default: the one in the game's folder; macOS: inside its app)
+
+Exit codes: 0 built (the game then starts), 2 built but the window was closed without Play, 1 failed
+or cancelled.
 """
 import json
 import os
@@ -38,8 +47,16 @@ from gameproject import EXE_SUFFIX, MACOS, WINDOWS  # noqa: E402
 # the minimum macOS of the fork's build (CMAKE_OSX_DEPLOYMENT_TARGET) and of the modules (toolchain.py)
 MACOS_MINIMUM = '13.3'
 
-SETUP = os.path.dirname(os.path.dirname(TOOLS))
-GAME = os.path.join(SETUP, 'kit', 'game')  # the template the playable folder is made from
+SETUP = os.path.dirname(os.path.dirname(TOOLS))  # <game folder>/setup
+OUT = os.path.dirname(SETUP)  # the game's folder: the release, built in place
+GAME = os.path.join(SETUP, 'kit', 'game')  # game.json and the game folder's README
+
+
+def game_exe(game):
+    """The game's executable in its folder (macOS: the app's own, inside the bundle)."""
+    if MACOS:
+        return os.path.join(OUT, app_name(game) + '.app', 'Contents', 'MacOS', game['id'])
+    return os.path.join(OUT, game['id'] + EXE_SUFFIX)
 
 
 def desktop_shortcut(exe, name):
@@ -178,15 +195,12 @@ def mac_icns(png, icns):
                           capture_output=True).returncode == 0
 
 
-def mac_app(exe, game, out, applications):
-    """macOS: '<name>.app' in the playable folder, the game's launcher in Finder, the Dock and
-    Spotlight, with its icon; with applications a copy in ~/Applications (Launchpad). The app runs a
-    copy of exe (with MoltenVK, which exe finds beside itself): macOS gives Game Mode only to a
-    bundle's own executable, not to one a script inside it starts. LSEnvironment names the playable
-    folder (VITA_RECOMPS_GAME_DIR), so the settings, logs and saves stay there for both apps. Made
-    here on the player's Mac (never downloaded, so Gatekeeper doesn't check it) and signed ad hoc as
-    a whole. Returns the folder's app and the copy ('' when not made)."""
-    app = os.path.join(out, app_name(game) + '.app')
+def mac_bundle(exe, game, app, png, game_dir=None):
+    """macOS: the game's app bundle at app ('<name>.app'), made by make-setup.py for a release. It runs
+    exe itself, a copy in Contents/MacOS with MoltenVK beside it (exe's rpath): macOS gives Game Mode
+    only to a bundle's own executable. The game's folder is the one holding the app
+    (SDL_FILESYSTEM_BASE_DIR_TYPE = parent), or game_dir (LSEnvironment VITA_RECOMPS_GAME_DIR, for a
+    copy elsewhere). Its icon is png in a macOS icon's shape; the bundle is signed ad hoc as a whole."""
     shutil.rmtree(app, ignore_errors=True)
     macos = os.path.join(app, 'Contents', 'MacOS')
     os.makedirs(macos)
@@ -204,37 +218,39 @@ def mac_app(exe, game, out, applications):
         # Game Mode in full screen (macOS 26 reads LSSupportsGameMode, 14 and 15 GCSupportsGameMode): the
         # game gets the CPU and GPU first, background work less, Bluetooth controllers a faster rate
         'LSSupportsGameMode': True, 'GCSupportsGameMode': True,
-        # the playable folder: the front end's (VITA_RECOMPS_GAME_DIR, for this app and its copy), and
-        # SDL's base folder when the variable is missing (the folder holding this app)
-        'LSEnvironment': {'VITA_RECOMPS_GAME_DIR': out}, 'SDL_FILESYSTEM_BASE_DIR_TYPE': 'parent',
+        'SDL_FILESYSTEM_BASE_DIR_TYPE': 'parent',
     }
-    # the icon: make-dist.py's PNG in the shape of a macOS icon, as an .icns (sips, part of macOS)
-    png = os.path.join(out, game['id'] + '.png')
+    if game_dir:
+        info['LSEnvironment'] = {'VITA_RECOMPS_GAME_DIR': game_dir}
     icns = os.path.join(app, 'Contents', 'Resources', game['id'] + '.icns')
-    if os.path.exists(png) and mac_icns(png, icns):
+    if png and os.path.exists(png) and mac_icns(png, icns):
         info['CFBundleIconFile'] = game['id']
     with open(os.path.join(app, 'Contents', 'Info.plist'), 'wb') as f:
         plistlib.dump(info, f)
     # one ad hoc signature over the bundle (its Info.plist bound), as an app built by Xcode has
-    subprocess.run(['codesign', '-s', '-', '--force', app], capture_output=True)
-    copy = ''
-    if applications:
-        folder = os.path.join(os.path.expanduser('~'), 'Applications')
-        os.makedirs(folder, exist_ok=True)
-        copy = os.path.join(folder, os.path.basename(app))
-        shutil.rmtree(copy, ignore_errors=True)
-        shutil.copytree(app, copy, symlinks=True)
-    return app, copy
+    subprocess.run(['codesign', '-s', '-', '--force', app], capture_output=True, check=True)
 
 
-def default_cache():
-    """Where the downloads go, shared by every game's setup."""
-    if WINDOWS:
-        return os.path.join(os.environ.get('LOCALAPPDATA', SETUP), 'vita-recomps')
-    if MACOS:
-        return os.path.join(os.path.expanduser('~'), 'Library', 'Caches', 'vita-recomps')
-    base = os.environ.get('XDG_CACHE_HOME') or os.path.join(os.path.expanduser('~'), '.cache')
-    return os.path.join(base, 'vita-recomps')
+def mac_applications_copy(app, game_dir):
+    """macOS: a copy of the game's app in ~/Applications (Launchpad, Spotlight) that runs the game in
+    game_dir (LSEnvironment), signed again. Its path."""
+    folder = os.path.join(os.path.expanduser('~'), 'Applications')
+    os.makedirs(folder, exist_ok=True)
+    copy = os.path.join(folder, os.path.basename(app))
+    shutil.rmtree(copy, ignore_errors=True)
+    shutil.copytree(app, copy, symlinks=True)
+    plist = os.path.join(copy, 'Contents', 'Info.plist')
+    with open(plist, 'rb') as f:
+        info = plistlib.load(f)
+    info['LSEnvironment'] = {'VITA_RECOMPS_GAME_DIR': game_dir}
+    with open(plist, 'wb') as f:
+        plistlib.dump(info, f)
+    subprocess.run(['codesign', '-s', '-', '--force', copy], capture_output=True)
+    lsregister = ('/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework'
+                  '/Support/lsregister')
+    if os.path.exists(lsregister):  # LaunchServices reads LSEnvironment when it registers the app
+        subprocess.run([lsregister, '-f', copy], capture_output=True)
+    return copy
 
 
 def ask(prompt, default=''):
@@ -280,21 +296,22 @@ def ask_parts(game):
                 parts += (['--license', os.path.abspath(lic)] if os.path.exists(lic) else ['--zrif', lic])
 
 
+def remove(path):
+    """A file or folder, if there."""
+    if os.path.isdir(path):
+        shutil.rmtree(path, ignore_errors=True)
+    elif os.path.exists(path):
+        os.remove(path)
+
+
 def main():
     argv = sys.argv[1:]
     with open(os.path.join(GAME, 'game.json'), encoding='utf-8') as f:
         game = json.load(f)
-    default_out = os.path.join(os.path.dirname(SETUP), game['id'])
     platform = 'windows' if WINDOWS else 'macos' if MACOS else 'linux'
     lock_path = os.path.join(TOOLS, f'toolchain-{platform}.json')
     with open(lock_path, encoding='utf-8') as f:
         lock = json.load(f)
-    if not argv:
-        import setupgui
-        setupgui.Window(game, os.path.abspath(__file__), default_out, lock.get('microsoft_license')).run()
-        return
-    if argv == ['--console']:
-        argv = []
     parts, rest, i = [], [], 0
     while i < len(argv):
         if argv[i] in ('--install', '--license', '--zrif') and i + 1 < len(argv):
@@ -306,21 +323,34 @@ def main():
     opts = {}
     j = 0
     while j < len(rest):
-        if rest[j] in ('--out', '--cache', '--jobs') and j + 1 < len(rest):
+        if rest[j] in ('--cache', '--jobs', '--exe') and j + 1 < len(rest):
             opts[rest[j]] = rest[j + 1]
             j += 2
-        elif rest[j] in ('--accept-microsoft-license', '--shortcut', '--steam'):
+        elif rest[j] in ('--accept-microsoft-license', '--shortcut', '--steam', '--add-to-steam', '--console'):
             opts[rest[j]] = True
             j += 1
         else:
             sys.exit(__doc__)
+    exe = os.path.abspath(opts['--exe']) if opts.get('--exe') else game_exe(game)
+
+    if opts.get('--add-to-steam'):
+        if WINDOWS or MACOS:
+            sys.exit('--add-to-steam: Linux (and the Steam Deck) only for now; add the game to Steam with '
+                     '"Add a Non-Steam Game"')
+        print(add_to_steam(desktop_entry(exe, game, OUT, False)[0]))
+        return
+    if not parts and not opts.get('--console'):
+        import setupgui
+        sys.exit(setupgui.Window(game, os.path.abspath(__file__), OUT, exe, lock.get('microsoft_license')).run())
     interactive = not parts
 
     print(f'{game["name"]}: setup')
     if interactive:
         parts = ask_parts(game)
-    out = opts.get('--out') or (ask('\nPlayable folder', default_out) if interactive else default_out)
-    cache = opts.get('--cache') or default_cache()
+    out = OUT
+    # the downloads: inside setup/ and gone after the build, unless --cache keeps them elsewhere
+    cache = os.path.abspath(opts['--cache']) if opts.get('--cache') else os.path.join(SETUP, 'downloads')
+    work = os.path.join(SETUP, 'work')
     jobs = opts.get('--jobs') or str(max(1, min(os.cpu_count() or 4, 6)))
 
     # nothing to accept on Linux and macOS: zig is MIT, its LLVM parts Apache
@@ -345,28 +375,35 @@ def main():
     if any(have.get(k) != lock[k] for k in pinned):
         toolchain.fetch(lock_path, tc_dir, True)
 
-    print(f'\n2/3 installing the game, recompiling and compiling its code into {out} (several minutes)')
+    print(f'\n2/3 installing the game, recompiling and compiling its code in {out} (several minutes)')
     firmware = [os.path.join(cache, 'firmware', 'PSVUPDAT.PUP'), os.path.join(cache, 'firmware', 'PSP2UPDAT.PUP')]
-    r = subprocess.run(py + [os.path.join(TOOLS, 'install-game.py'), '--project', GAME, '--bin', GAME,
-                             '--toolchain', tc_dir, '--out', out, '--jobs', jobs, '--firmware', *firmware] + parts)
+    r = subprocess.run(py + [os.path.join(TOOLS, 'install-game.py'), '--project', GAME, '--bin', out,
+                             '--exe', exe, '--work', work, '--toolchain', tc_dir, '--out', out, '--jobs', jobs,
+                             '--firmware', *firmware] + parts)
     if r.returncode:
-        sys.exit('the setup failed (see above)')
+        # the work files stay, for a look at what went wrong; the next build replaces them
+        sys.exit(f'the setup failed (see above; its work files are in {work})')
 
-    exe = os.path.join(out, game['id'] + EXE_SUFFIX)
+    # nothing of the build is left outside what the game needs: the work files (generated code), the
+    # modules as the game loaded them, and the downloads (unless --cache keeps them)
+    remove(work)
+    remove(os.path.join(out, game['id'], 'elfdumps'))
+    if not opts.get('--cache'):
+        remove(cache)
+
     if opts.get('--shortcut') and WINDOWS:
         lnk = desktop_shortcut(exe, game['name'])
         print(f'desktop shortcut: {lnk}' if lnk else 'the desktop shortcut could not be made')
-    elif MACOS:
-        app, copy = mac_app(exe, game, out, bool(opts.get('--shortcut')))
-        print(f'app: {app}' + (f' (and in Applications: {copy})' if copy else ''))
-        exe = app
-    elif not WINDOWS:
+    elif MACOS and opts.get('--shortcut'):
+        app = exe.split('.app' + os.sep)[0] + '.app'
+        print(f'in Applications: {mac_applications_copy(app, out)}')
+    elif not WINDOWS and not MACOS:
         desktop, entry = desktop_entry(exe, game, out, bool(opts.get('--shortcut')))
         if opts.get('--shortcut'):
             print(f'applications menu entry: {entry}' if entry else 'the menu entry could not be made')
         if opts.get('--steam'):
             print(add_to_steam(desktop))
-    print(f'\n3/3 done: the game is in {out}. Start {exe}')
+    print(f'\n3/3 done: the game is built in {out}')
 
 
 if __name__ == '__main__':

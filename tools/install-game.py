@@ -11,7 +11,7 @@ usage:
   python -I install-game.py [--project DIR] --firmware PUP [PUP ...]
                             --install <zip|vpk|folder|pkg> [--license <work.bin|rif> | --zrif Z]
                             [--install ...] [--name NAME | --out DIR] [--dump-seconds N] [--no-recompile]
-                            [--no-jit] [--bin DIR] [--toolchain DIR] [--jobs N]
+                            [--no-jit] [--bin DIR] [--exe FILE] [--work DIR] [--toolchain DIR] [--jobs N]
 
   --install   repeat for each part, in order (the game, then its patch, then add-ons); a pkg's
               --license or --zrif follows it. A patch's or add-on's licence can be omitted when
@@ -20,7 +20,11 @@ usage:
   --no-jit        package the front end built without dynarmic (build-vita3k.py --no-jit): native
                   code only. The install and the ELF dump still use the JIT build.
   --bin           the front end's folder from a prebuilt release instead of the project's build
-                  (it installs, dumps and is packaged)
+                  (it installs, dumps and is packaged); it may be --out itself (a release folder
+                  that builds in place: the front end's files stay as they are)
+  --exe           the front end's executable, when it isn't <bin>/<id><suffix> (macOS: inside the
+                  release's app bundle)
+  --work          the work files (default <out>-work)
   --toolchain     compile with the toolchain toolchain.py unpacked there (no Visual Studio, CMake or
                   Ninja); otherwise MSVC, CMake and Ninja
   --out           the playable folder (default dist/<name>); the work files go to <out>-work
@@ -63,16 +67,21 @@ def main():
     ap.add_argument('--no-recompile', action='store_true')
     ap.add_argument('--no-jit', action='store_true')
     ap.add_argument('--bin', default='')
+    ap.add_argument('--exe', default='')
+    ap.add_argument('--work', default='')
     ap.add_argument('--toolchain', default='')
     ap.add_argument('--out', default='')
     ap.add_argument('--jobs', type=int, default=4)
     a = ap.parse_args(rest)
     if '--install' not in content:
         sys.exit('nothing to install: --install <game dump>')
+    # the front end takes each part as --install-content (its own --install reopens a release's importer)
+    content = ['--install-content' if x == '--install' else x for x in content]
 
     p = Project(a.project)
-    exe = p.exe(bin_dir=a.bin)
-    bin_dir = os.path.dirname(exe)
+    exe = os.path.abspath(a.exe) if a.exe else p.exe(bin_dir=a.bin)
+    # the folder the front end treats as its own (settings, logs, elfdumps): --bin, else the exe's
+    bin_dir = os.path.abspath(a.bin) if a.bin else os.path.dirname(exe)
     name = a.name or p.id
     if a.out:
         out = os.path.abspath(a.out)
@@ -80,6 +89,7 @@ def main():
     else:
         out = os.path.join(p.root, 'dist', name)
         work = os.path.join(p.root, 'build', 'install-' + name)
+    work = os.path.abspath(a.work) if a.work else work
     fs = os.path.join(out, 'fs')
     os.makedirs(fs, exist_ok=True)
     os.makedirs(work, exist_ok=True)
@@ -87,9 +97,10 @@ def main():
     def front_end(args, extra_env=None, drop=None):
         """Run the front end; output lines matching drop are left out."""
         env = dict(os.environ, **(extra_env or {}))
+        cmd = [exe, '--game', bin_dir, '--vita-fs', fs] + args
         if not drop:
-            return subprocess.run([exe, '--vita-fs', fs] + args, cwd=bin_dir, env=env).returncode
-        proc = subprocess.Popen([exe, '--vita-fs', fs] + args, cwd=bin_dir, env=env, stdout=subprocess.PIPE,
+            return subprocess.run(cmd, cwd=bin_dir, env=env).returncode
+        proc = subprocess.Popen(cmd, cwd=bin_dir, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, errors='replace')
         for line in proc.stdout:
             if not drop.search(line):
@@ -166,6 +177,7 @@ def main():
     dist = [sys.executable, '-I', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'make-dist.py'),
             '--project', p.root, '--out', out]
     dist += ['--bin', bin_dir] if a.bin else []
+    dist += ['--exe', exe] if a.exe else []
     # the VC++ runtime DLLs (the Windows toolchain only)
     dist += ['--redist', os.path.join(a.toolchain, 'redist')] if a.toolchain and os.path.isdir(os.path.join(a.toolchain, 'redist')) else []
     dist += ['--recompiled-dir', recompiled_dir] if not a.no_recompile and p.modules else ['--no-recompiled']

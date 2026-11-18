@@ -14,7 +14,7 @@ import webbrowser
 from tkinter import filedialog, messagebox, ttk
 
 import dumpinfo
-from gameproject import EXE_SUFFIX, MACOS, WINDOWS
+from gameproject import MACOS, WINDOWS
 
 # a console of its own that no one sees, which every program the setup starts shares (Windows)
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -117,17 +117,21 @@ class Part:
 
 
 class Window:
-    def __init__(self, game, setup_py, default_out, licence_url):
-        """licence_url: Microsoft's licence the Windows compiler needs accepted; None when there is none."""
+    def __init__(self, game, setup_py, out, exe, licence_url):
+        """out: the game's folder, where it is built; exe: the game's executable (which started this
+        window and waits for it); licence_url: Microsoft's licence the Windows compiler needs accepted,
+        None when there is none."""
         self.game = game
-        self.exe_name = game['id'] + EXE_SUFFIX
+        self.exe = exe
         self.setup_py = setup_py
         self.root = tk.Tk()
         self.root.title(f'{game["name"]}: setup')
         self.root.minsize(760, 0)
         self.lines = queue.Queue()
         self.proc = None
-        self.out = tk.StringVar(value=default_out)
+        self.out = out
+        self.built = False
+        self.result = 1  # setup.py's exit code: 1 cancelled, 0 Play, 2 built but closed
         self.accepted = tk.BooleanVar(value=licence_url is None)
         self.shortcut = tk.BooleanVar(value=True)
         self.steam = tk.BooleanVar(value=True)  # Linux: setup.py --steam
@@ -141,9 +145,10 @@ class Window:
         f.columnconfigure(0, weight=1)
         ttk.Label(f, text=game['name'], font=('Segoe UI', 14, 'bold')).grid(sticky='w')
         ttk.Label(f, wraplength=720, justify='left', text=(
-            f'This turns your own dump of the game ({" or ".join([game["title_id"]] + game.get("other_title_ids", []))}) into a playable port. It downloads '
+            f'This turns your own dump of the game ({" or ".join([game["title_id"]] + game.get("other_title_ids", []))}) into the game, once. It downloads '
             'the PS Vita firmware from Sony and a compiler, then translates the game\'s code and compiles it on '
-            'this computer, which takes a few minutes. Nothing of the game leaves your computer.')).grid(sticky='w', pady=(4, 10))
+            'this computer, which takes a few minutes. Everything stays in the game\'s folder; the downloads are '
+            'deleted afterwards. Nothing of the game leaves your computer.')).grid(sticky='w', pady=(4, 10))
 
         dump = ttk.LabelFrame(f, text='Your dump: a pkg (with its work.bin or .rif), a folder, a zip or a vpk',
                               padding=8)
@@ -161,12 +166,8 @@ class Window:
         self.check_pending = None
         self.parts[0].path.trace_add('write', self.watch_dump)
 
-        where = ttk.Frame(f)
-        where.grid(sticky='ew', pady=(10, 0))
-        where.columnconfigure(1, weight=1)
-        ttk.Label(where, text='Playable folder').grid(row=0, column=0, padx=(0, 8))
-        ttk.Entry(where, textvariable=self.out).grid(row=0, column=1, sticky='ew')
-        ttk.Button(where, text='Browse...', command=self.pick_out).grid(row=0, column=2, padx=2)
+        ttk.Label(f, foreground='gray', wraplength=720, justify='left',
+                  text=f'The game\'s folder: {out}').grid(sticky='w', pady=(10, 0))
 
         if licence_url:
             lic = ttk.Frame(f)
@@ -187,7 +188,7 @@ class Window:
 
         buttons = ttk.Frame(f)
         buttons.grid(sticky='ew', pady=(12, 0))
-        self.install = ttk.Button(buttons, text='Install', command=self.start)
+        self.install = ttk.Button(buttons, text='Build', command=self.start)
         self.install.grid(row=0, column=0)
         self.play = ttk.Button(buttons, text='Play', command=self.launch, state='disabled')
         self.play.grid(row=0, column=1, padx=6)
@@ -257,11 +258,6 @@ class Window:
         self.addon_row += 2
         part.pick_file()
 
-    def pick_out(self):
-        d = filedialog.askdirectory()
-        if d:
-            self.out.set(os.path.normpath(d))
-
     def write(self, text):
         self.log['state'] = 'normal'
         # progress lines ("  12 / 447 MB ...", "  25/82") replace the previous one
@@ -285,15 +281,16 @@ class Window:
         if not self.accepted.get():
             messagebox.showerror('Setup', 'The compiler needs Microsoft\'s licence accepted.')
             return
-        out = self.out.get().strip()
-        if os.path.exists(os.path.join(out, self.exe_name)) and not messagebox.askyesno(
-                'Setup', f'{out} already holds the game. Install over it? (Saves in it are kept.)'):
+        ids = [self.game['title_id']] + self.game.get('other_title_ids', [])
+        if any(os.path.exists(os.path.join(self.out, 'fs', 'ux0', 'app', i, 'eboot.bin')) for i in ids) and \
+                not messagebox.askyesno('Setup', 'The game is built already. Build it again from this dump? '
+                                        '(Saves and settings are kept.)'):
             return
         args = [a for p in parts for a in p.args()]
         # Windows: python.exe beside the pythonw.exe that runs the window, for a console the setup's
         # programs share; Linux and macOS: the same interpreter
         python = os.path.join(os.path.dirname(sys.executable), 'python.exe') if WINDOWS else sys.executable
-        cmd = [python, '-I', '-u', self.setup_py, *args, '--out', out, *self.extra_args]
+        cmd = [python, '-I', '-u', self.setup_py, *args, '--exe', self.exe, *self.extra_args]
         if WINDOWS:
             cmd.append('--accept-microsoft-license')
         if self.shortcut.get():
@@ -335,30 +332,33 @@ class Window:
         self.proc = None
         self.install['state'] = 'normal'
         if code == 0:
+            self.built = True
             self.bar['value'] = self.bar['maximum']
-            where = 'its app there' if MACOS else 'the desktop shortcut' if WINDOWS else 'the applications menu'
-            self.stage.set(f'Done. The game is in {self.out.get().strip()}: play it from there, with Play, '
-                           f'or from {where}. Don\'t start the game inside the setup\'s own folder.')
+            self.stage.set('Done: the game is built. Play starts it; from now on, starting the game goes '
+                           'straight to it.')
             self.play['state'] = 'normal'
             self.open['state'] = 'normal'
+            self.play.focus_set()
         else:
             self.stage.set('The setup failed: see the messages above.')
 
     def launch(self):
-        out = self.out.get().strip()
-        subprocess.Popen([os.path.join(out, self.exe_name)], cwd=out)
+        """Play: the game, which started this window and waits for it, carries on."""
+        self.result = 0
+        self.root.destroy()
 
     def open_folder(self):
         if WINDOWS:
-            os.startfile(self.out.get().strip())
+            os.startfile(self.out)
         elif MACOS:
-            subprocess.Popen(['open', self.out.get().strip()])
+            subprocess.Popen(['open', self.out])
         else:
-            subprocess.Popen(['xdg-open', self.out.get().strip()])
+            subprocess.Popen(['xdg-open', self.out])
 
     def close(self):
         if self.proc and not messagebox.askyesno('Setup', 'The setup is still running. Stop it?'):
             return
+        self.result = 2 if self.built else 1
         if self.proc and WINDOWS:
             subprocess.run(['taskkill', '/T', '/F', '/PID', str(self.proc.pid)], capture_output=True,
                            creationflags=NO_WINDOW)
@@ -370,4 +370,6 @@ class Window:
         self.root.destroy()
 
     def run(self):
+        """The window until it closes; setup.py's exit code (0 Play, 2 built and closed, 1 not built)."""
         self.root.mainloop()
+        return self.result
