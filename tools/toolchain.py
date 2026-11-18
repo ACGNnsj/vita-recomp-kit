@@ -22,7 +22,7 @@ it into <dir>/zig/, and the modules come out as ssd_aot_<module>.so (.dylib on m
 zig's linker, as Apple Silicon requires); zig keeps what it builds on first use (libc++) in <dir>/cache/.
   python -I toolchain.py fetch toolchain-linux.json|toolchain-macos.json <dir>
 """
-import concurrent.futures, glob, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile, urllib.request, zipfile
+import concurrent.futures, glob, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile, urllib.error, urllib.request, zipfile
 
 MACOS = sys.platform == 'darwin'
 
@@ -67,13 +67,37 @@ ZIG_EXPORTS = '{\n  global: armrecomp_aot_init;\n  local: *;\n};\n'
 LLVM_KEEP = re.compile(r'^[^/]+/(bin/(clang-\d+|ld\.lld|llvm-ar)\.exe|bin/[^/]+\.dll|lib/clang/\d+/include/.+)$')
 
 
+USER_AGENT = 'vita-recomp-kit toolchain.py'
+
+
+def windows_curl():
+    """Windows' own curl.exe (System32, Windows 10 1803 and later), which uses Windows' TLS; '' if missing."""
+    curl = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'curl.exe')
+    return curl if sys.platform == 'win32' and os.path.exists(curl) else ''
+
+
 def get(url, path=None):
-    req = urllib.request.Request(url, headers={'User-Agent': 'vita-recomp-kit toolchain.py'})
-    with urllib.request.urlopen(req, timeout=120) as r:
+    req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            if path is None:
+                return r.read()
+            with open(path, 'wb') as f:
+                shutil.copyfileobj(r, f, 1 << 20)
+    except urllib.error.URLError as e:
+        # On Windows, Python trusts only the root certificates already in Windows' store, and Windows
+        # adds a newer root only when its own TLS first meets it. GitHub's release-asset servers chain
+        # to Let's Encrypt's Root YR, which a PC may not have yet: certificate verification then fails
+        # here while browsers download the file. Windows' curl.exe uses Windows' TLS, which fetches
+        # the root; the SHA-256 of every payload is still checked against the lock by the caller.
+        curl = windows_curl()
+        if not (curl and 'CERTIFICATE_VERIFY_FAILED' in str(e.reason)):
+            raise
+        args = [curl, '-sSfL', '--retry', '3', '--connect-timeout', '60', '-A', USER_AGENT, url]
+        quiet = {'creationflags': subprocess.CREATE_NO_WINDOW}  # no console flashing up over the setup's window
         if path is None:
-            return r.read()
-        with open(path, 'wb') as f:
-            shutil.copyfileobj(r, f, 1 << 20)
+            return subprocess.run(args, check=True, capture_output=True, **quiet).stdout
+        subprocess.run(args + ['-o', path], check=True, **quiet)
 
 
 def sha256(path):
