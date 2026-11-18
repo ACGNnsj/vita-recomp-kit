@@ -23,7 +23,6 @@ usage (no arguments: a window asks, setupgui.py; --console: questions in the con
 import json
 import os
 import plistlib
-import shlex
 import shutil
 import subprocess
 import sys
@@ -180,24 +179,33 @@ def mac_icns(png, icns):
 
 def mac_app(exe, game, out, applications):
     """macOS: '<name>.app' in the playable folder, the game's launcher in Finder, the Dock and
-    Spotlight, with its icon; with applications a copy in ~/Applications (Launchpad). The app holds
-    only a script that starts exe, so the settings, logs and saves stay in the playable folder, and
-    it is made here on the player's Mac (never downloaded, so Gatekeeper doesn't check it). Returns
-    the folder's app and the copy ('' when not made)."""
+    Spotlight, with its icon; with applications a copy in ~/Applications (Launchpad). The app runs a
+    copy of exe (with MoltenVK, which exe finds beside itself): macOS gives Game Mode only to a
+    bundle's own executable, not to one a script inside it starts. LSEnvironment names the playable
+    folder (VITA_RECOMPS_GAME_DIR), so the settings, logs and saves stay there for both apps. Made
+    here on the player's Mac (never downloaded, so Gatekeeper doesn't check it) and signed ad hoc as
+    a whole. Returns the folder's app and the copy ('' when not made)."""
     app = os.path.join(out, app_name(game) + '.app')
     shutil.rmtree(app, ignore_errors=True)
-    os.makedirs(os.path.join(app, 'Contents', 'MacOS'))
+    macos = os.path.join(app, 'Contents', 'MacOS')
+    os.makedirs(macos)
     os.makedirs(os.path.join(app, 'Contents', 'Resources'))
-    launcher = os.path.join(app, 'Contents', 'MacOS', game['id'])
-    with open(launcher, 'w', encoding='utf-8', newline='\n') as f:
-        f.write(f'#!/bin/sh\ncd {shlex.quote(out)} && exec {shlex.quote(exe)} "$@"\n')
-    os.chmod(launcher, 0o755)
+    shutil.copy2(exe, os.path.join(macos, game['id']))
+    moltenvk = os.path.join(os.path.dirname(exe), 'libMoltenVK.dylib')
+    if os.path.exists(moltenvk):
+        shutil.copy2(moltenvk, macos)
     info = {
         'CFBundleName': game['name'], 'CFBundleDisplayName': game['name'],
         'CFBundleIdentifier': f'io.github.vita-recomps.{game["id"]}', 'CFBundleExecutable': game['id'],
         'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '1.0', 'CFBundleVersion': '1',
         'CFBundleInfoDictionaryVersion': '6.0', 'LSMinimumSystemVersion': MACOS_MINIMUM,
         'LSApplicationCategoryType': 'public.app-category.games', 'NSHighResolutionCapable': True,
+        # Game Mode in full screen (macOS 26 reads LSSupportsGameMode, 14 and 15 GCSupportsGameMode): the
+        # game gets the CPU and GPU first, background work less, Bluetooth controllers a faster rate
+        'LSSupportsGameMode': True, 'GCSupportsGameMode': True,
+        # the playable folder: the front end's (VITA_RECOMPS_GAME_DIR, for this app and its copy), and
+        # SDL's base folder when the variable is missing (the folder holding this app)
+        'LSEnvironment': {'VITA_RECOMPS_GAME_DIR': out}, 'SDL_FILESYSTEM_BASE_DIR_TYPE': 'parent',
     }
     # the icon: make-dist.py's PNG in the shape of a macOS icon, as an .icns (sips, part of macOS)
     png = os.path.join(out, game['id'] + '.png')
@@ -206,6 +214,8 @@ def mac_app(exe, game, out, applications):
         info['CFBundleIconFile'] = game['id']
     with open(os.path.join(app, 'Contents', 'Info.plist'), 'wb') as f:
         plistlib.dump(info, f)
+    # one ad hoc signature over the bundle (its Info.plist bound), as an app built by Xcode has
+    subprocess.run(['codesign', '-s', '-', '--force', app], capture_output=True)
     copy = ''
     if applications:
         folder = os.path.join(os.path.expanduser('~'), 'Applications')
