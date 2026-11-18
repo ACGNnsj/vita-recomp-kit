@@ -10,6 +10,12 @@ Checks the commits being pushed (as a git pre-push hook) or a given range:
     Keep that file outside the repo: it lists what must not be published.
 Matches are printed masked, so the scan itself doesn't echo a secret.
 
+Paths matching the globs in `git config leakscan.allow` (space-separated, e.g.
+'docs/assets/screenshots/*.jpg'; '*' stays within a folder) pass the file-type check: a project's
+deliberate exceptions, such as a README's screenshots. The size limit and the text checks still
+apply to them. The setting is the clone's own, never part of what is pushed, so a commit can't grant
+itself an exception.
+
 Commits the remote already has, and commits on remotes listed in `git config leakscan.trusted`
 (default: upstream), are not scanned: for a fork, only our own commits are.
 
@@ -18,6 +24,7 @@ usage:
   python -I leak-scan.py check <rev range> [...]     scan commits, e.g. 'main --not --remotes=github'
   (pre-push: git runs the hook with <remote> <url> and the refs being pushed on stdin)
 """
+import fnmatch
 import os
 import re
 import stat
@@ -66,26 +73,42 @@ def mask(text, m):
     return (text[:m.start()] + shown + text[m.end():]).strip()[:160]
 
 
+def glob_match(path, pattern):
+    """fnmatch per path segment: '*' never crosses a '/' (docs/x/*.jpg doesn't match docs/x/y/z.jpg)."""
+    a, b = path.split('/'), pattern.split('/')
+    return len(a) == len(b) and all(fnmatch.fnmatchcase(s, p) for s, p in zip(a, b))
+
+
 def scan(revs):
     """revs: rev-list arguments. Returns a list of findings (strings)."""
     commits = git('rev-list', *revs).split()
     if not commits:
         return []
     findings = []
-    # files: type and size
-    listing = git('rev-list', '--objects', *revs).decode(errors='replace').splitlines()
-    named = [(line[:40], line[41:]) for line in listing if len(line) > 41]
+    allowed = git('config', '--default', '', 'leakscan.allow').decode().split()
+    # files: type and size. The objects new to this range (rev-list --objects: not reachable from
+    # what is excluded, e.g. a trusted upstream), each under every path a commit gives it (diff-tree,
+    # with -m for merges): rev-list names a blob shared by several paths under one of them only
+    new = {line[:40] for line in git('rev-list', '--objects', *revs).decode(errors='replace').splitlines()}
+    named = set()
+    for c in commits:
+        raw = git('diff-tree', '-r', '-m', '--root', '--no-commit-id', '--no-renames', '-z', c).decode(errors='replace')
+        fields = raw.split('\0')
+        for meta, path in zip(fields[0::2], fields[1::2]):
+            parts = meta.split()
+            if len(parts) == 5 and parts[4] != 'D' and parts[3] in new:
+                named.add((parts[3], path))
     if named:
         sizes = git('cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)',
                     input='\n'.join(o for o, _ in named).encode()).decode().splitlines()
         info = {s.split()[0]: (s.split()[1], int(s.split()[2])) for s in sizes if len(s.split()) == 3}
-        for oid, path in named:
+        for oid, path in sorted(named, key=lambda n: n[1]):
             kind, size = info.get(oid, ('', 0))
             if kind != 'blob':
                 continue
             name = path.rsplit('/', 1)[-1].lower()
             ext = os.path.splitext(name)[1]
-            if ext in DATA_EXT or name in DATA_NAMES:
+            if (ext in DATA_EXT or name in DATA_NAMES) and not any(glob_match(path, g) for g in allowed):
                 findings.append(f'game-data file type: {path}')
             elif size > MAX_MB * 2**20:
                 findings.append(f'file over {MAX_MB} MB: {path} ({size / 2**20:.1f} MB)')
