@@ -18,6 +18,8 @@ game.json:
     "dist_files": {"run-player2.bat": "..."}  more files written into the packaged folder (Windows)
     "dist_files_linux": {"run-player2.sh": "..."}   the same on Linux (written executable)
     "dist_readme_macos", "dist_files_macos"   the same on macOS (default: none of the Linux files)
+    "release_files": ["recomplauncher.json"]  project files copied as they are to the top of a
+                                              release's folder (make-setup.py), on every platform
   }
 """
 import json
@@ -72,6 +74,7 @@ class Project:
             self.dist_readme, self.dist_files = g.get('dist_readme_macos', g.get('dist_readme')), g.get('dist_files_macos', {})
         else:
             self.dist_readme, self.dist_files = g.get('dist_readme_linux', g.get('dist_readme')), g.get('dist_files_linux', {})
+        self.release_files = g.get('release_files', [])
         self.exe_name = self.id + EXE_SUFFIX
 
     def installed_title(self, fs):

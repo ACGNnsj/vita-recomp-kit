@@ -8,6 +8,7 @@ folder:
   (Windows) the DLLs it loads, the VC++ runtime among them (from the build machine's Visual Studio)
   data/ shaders-builtin/ icons/ COPYING.txt   Vita3K's files the front end reads
   README.txt              the game folder's README (game.json's dist_readme for the platform)
+  game.json's release_files, e.g. recomplauncher.json (RecompLauncher's setup and settings)
   setup/python/           Python with Tk, capstone and PyYAML (versions pinned: the recompiler's
                           output depends on capstone's): Windows, python.org's embeddable
                           distribution and tcltk.msi; Linux and macOS, python-build-standalone
@@ -411,6 +412,8 @@ def front_end(p, bin_dir, out, files, exe=None):
             f.write(text)
         if not windows:
             os.chmod(os.path.join(out, fname), 0o755)  # a launcher script
+    for rel in p.release_files:
+        shutil.copy2(os.path.join(p.root, rel), os.path.join(out, os.path.basename(rel)))
 
 
 def finish(a, out, fmt):
