@@ -27,6 +27,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
@@ -101,6 +102,82 @@ def app_name(game):
     return game['name'].replace(': ', ' - ').replace(':', '-').replace('/', '-')
 
 
+# Apple's app icon grid: a 1024-point canvas, the artwork an 824-point rounded square in its middle with a
+# slight shadow below. macOS doesn't shape an app's icon itself: a square picture fills the whole canvas
+# and looks bigger than the other icons in the Dock, with sharp corners. Drawn with AppKit through
+# osascript's JavaScript bridge, so the setup still needs nothing but macOS's own python3.
+MAC_ICON_SCRIPT = '''
+ObjC.import('AppKit');
+function run(argv) {
+    const src = $.NSImage.alloc.initWithContentsOfFile(argv[0]);
+    if (src.isNil()) return 'unreadable';
+    const size = 1024, side = 824, radius = 185.4, inset = (size - side) / 2;
+    const rep = $.NSBitmapImageRep.alloc.initWithBitmapDataPlanesPixelsWidePixelsHighBitsPerSampleSamplesPerPixelHasAlphaIsPlanarColorSpaceNameBytesPerRowBitsPerPixel(
+        null, size, size, 8, 4, true, false, $.NSDeviceRGBColorSpace, 0, 0);
+    // (setters called as methods: assigning a property in JXA doesn't reach Objective-C)
+    const context = $.NSGraphicsContext.graphicsContextWithBitmapImageRep(rep);
+    $.NSGraphicsContext.saveGraphicsState;
+    $.NSGraphicsContext.setCurrentContext(context);
+    context.setImageInterpolation($.NSImageInterpolationHigh);
+    const rect = $.NSMakeRect(inset, inset + 6, side, side);
+    const shape = $.NSBezierPath.bezierPathWithRoundedRectXRadiusYRadius(rect, radius, radius);
+    const shadow = $.NSShadow.alloc.init;
+    shadow.setShadowOffset($.NSMakeSize(0, -10));
+    shadow.setShadowBlurRadius(24);
+    shadow.setShadowColor($.NSColor.colorWithCalibratedWhiteAlpha(0, 0.3));
+    $.NSGraphicsContext.saveGraphicsState;
+    shadow.set;
+    $.NSColor.blackColor.setFill;
+    shape.fill;
+    $.NSGraphicsContext.restoreGraphicsState;
+    shape.addClip;
+    // only the opaque part: a game icon may have its own transparent margin and corners (the middle
+    // row and column give the margins; colorAtXY counts y from the top, the image from the bottom)
+    const pixels = $.NSBitmapImageRep.imageRepWithData(src.TIFFRepresentation);
+    const w = pixels.pixelsWide, h = pixels.pixelsHigh;
+    const opaque = (x, y) => pixels.colorAtXY(x, y).alphaComponent > 0.5;
+    const edge = (n, test) => { let i = 0; while (i < n / 2 && !test(i)) i++; return i < n / 2 ? i : 0; };
+    const left = edge(w, x => opaque(x, h >> 1)), right = edge(w, x => opaque(w - 1 - x, h >> 1));
+    const top = edge(h, y => opaque(w >> 1, y)), bottom = edge(h, y => opaque(w >> 1, h - 1 - y));
+    const sx = src.size.width / w, sy = src.size.height / h;
+    const from = $.NSMakeRect(left * sx, bottom * sy, (w - left - right) * sx, (h - top - bottom) * sy);
+    src.drawInRectFromRectOperationFraction(rect, from, $.NSCompositingOperationSourceOver, 1.0);
+    $.NSGraphicsContext.restoreGraphicsState;
+    const data = rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $({}));
+    return data.writeToFileAtomically(argv[1], true) ? 'ok' : 'unwritable';
+}
+'''
+
+
+def mac_icon_shape(png, out):
+    """png drawn into the macOS icon shape (see MAC_ICON_SCRIPT) as out; False if that failed."""
+    r = subprocess.run(['osascript', '-l', 'JavaScript', '-e', MAC_ICON_SCRIPT, png, out],
+                       capture_output=True, text=True)
+    return r.returncode == 0 and r.stdout.strip() == 'ok' and os.path.exists(out)
+
+
+def mac_icns(png, icns):
+    """png as icns, shaped as a macOS icon, every size from 16 to 1024 (512@2x) through an iconset
+    (sips and iconutil, part of macOS; sips alone writes an .icns only up to 512). Falls back to sips
+    on the unshaped picture."""
+    with tempfile.TemporaryDirectory() as tmp:
+        shaped = os.path.join(tmp, 'icon.png')
+        source = shaped if mac_icon_shape(png, shaped) else png
+        iconset = os.path.join(tmp, 'icon.iconset')
+        os.makedirs(iconset)
+        ok = True
+        for size in (16, 32, 128, 256, 512):
+            for scale, suffix in ((1, ''), (2, '@2x')):
+                name = os.path.join(iconset, f'icon_{size}x{size}{suffix}.png')
+                ok = ok and subprocess.run(['sips', '-z', str(size * scale), str(size * scale), source,
+                                            '--out', name], capture_output=True).returncode == 0
+        if ok and subprocess.run(['iconutil', '-c', 'icns', iconset, '-o', icns],
+                                 capture_output=True).returncode == 0 and os.path.exists(icns):
+            return True
+    return subprocess.run(['sips', '-s', 'format', 'icns', png, '--out', icns],
+                          capture_output=True).returncode == 0
+
+
 def mac_app(exe, game, out, applications):
     """macOS: '<name>.app' in the playable folder, the game's launcher in Finder, the Dock and
     Spotlight, with its icon; with applications a copy in ~/Applications (Launchpad). The app holds
@@ -122,11 +199,10 @@ def mac_app(exe, game, out, applications):
         'CFBundleInfoDictionaryVersion': '6.0', 'LSMinimumSystemVersion': MACOS_MINIMUM,
         'LSApplicationCategoryType': 'public.app-category.games', 'NSHighResolutionCapable': True,
     }
-    # the icon: make-dist.py's PNG, as an .icns (sips, part of macOS)
+    # the icon: make-dist.py's PNG in the shape of a macOS icon, as an .icns (sips, part of macOS)
     png = os.path.join(out, game['id'] + '.png')
     icns = os.path.join(app, 'Contents', 'Resources', game['id'] + '.icns')
-    if os.path.exists(png) and subprocess.run(['sips', '-s', 'format', 'icns', png, '--out', icns],
-                                              capture_output=True).returncode == 0:
+    if os.path.exists(png) and mac_icns(png, icns):
         info['CFBundleIconFile'] = game['id']
     with open(os.path.join(app, 'Contents', 'Info.plist'), 'wb') as f:
         plistlib.dump(info, f)
