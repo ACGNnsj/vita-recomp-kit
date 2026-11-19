@@ -232,11 +232,11 @@ class FunctionEmitter:
             lines = [f'switch ({idx}) {{']
             for n, x in enumerate(targets):
                 lines.append(f'    case {n}: goto L_{x:08x};')
-            lines.append(f'    default: unsupported(ctx, 0x{ins.address:08x}u);')
+            lines.append(f'    default: unsupported(ctx, 0x{ins.address | (1 if self.f.thumb else 0):08x}u);')
             lines.append('}')
             return lines
         if k == 'trap':
-            return [f'unsupported(ctx, 0x{ins.address:08x}u);']
+            return [f'unsupported(ctx, 0x{ins.address | (1 if self.f.thumb else 0):08x}u);']
         return []
 
     def tail_call(self, target):

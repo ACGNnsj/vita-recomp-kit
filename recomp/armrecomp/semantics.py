@@ -1149,7 +1149,7 @@ def translate(ins, thumb, imports, func_start, func_end, jumptables, patched=fro
         if not isinstance(e, Unsupported):
             e = f'internal {type(e).__name__}: {e}'
         t.kind = 'unsupported'
-        t.stmts = [f'unsupported(ctx, 0x{ins.address:08x}u); // {cs.mnemonic} {cs.op_str}: {e}']
+        t.stmts = [f'unsupported(ctx, 0x{ins.address | (1 if thumb else 0):08x}u); // {cs.mnemonic} {cs.op_str}: {e}']
         t.flags_read, t.flags_written = set(), set()
     if ins.it_cond:
         t.flags_read |= set(COND_FLAGS[ins.it_cond])
